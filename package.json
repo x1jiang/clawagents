@@ -1,0 +1,32 @@
+{
+  "name": "clawagents",
+  "version": "1.0.0",
+  "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts",
+    "task": "npx tsx src/index.ts --task",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "agent",
+    "llm",
+    "openclaw",
+    "deepagents"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^1.9.0",
+    "dotenv": "^16.6.1",
+    "openai": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
