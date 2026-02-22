@@ -1,6 +1,6 @@
 {
   "name": "clawagents",
-  "version": "1.0.0",
+  "version": "3.3.0",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
   "main": "src/index.ts",
   "type": "module",

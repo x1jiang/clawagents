@@ -7,68 +7,43 @@
  *   npx tsx src/index.ts --task "..."     # Run a single task from CLI
  */
 
-import { loadConfig } from "./config/config.js";
-import { createProvider } from "./providers/llm.js";
-import { ToolRegistry } from "./tools/registry.js";
-import { filesystemTools } from "./tools/filesystem.js";
-import { execTools } from "./tools/exec.js";
-import { SkillStore, createSkillTools } from "./tools/skills.js";
-import { runAgentGraph } from "./graph/agent-loop.js";
+import { loadConfig, getDefaultModel } from "./config/config.js";
+import { createClawAgent } from "./agent.js";
 import { startGateway } from "./gateway/server.js";
-import { resolve } from "node:path";
 
-async function initializeTools(): Promise<ToolRegistry> {
-    const registry = new ToolRegistry();
-
-    // Register filesystem tools (deepagents-style)
-    for (const tool of filesystemTools) {
-        registry.register(tool);
-    }
-
-    // Register exec tool
-    for (const tool of execTools) {
-        registry.register(tool);
-    }
-
-    // Load and register skills (openclaw-style)
-    const skillStore = new SkillStore();
-    // Check for skills in common locations
-    skillStore.addDirectory(resolve(process.cwd(), "skills"));
-    skillStore.addDirectory(resolve(process.cwd(), "../openclaw-main/skills"));
-    await skillStore.loadAll();
-
-    const skillTools = createSkillTools(skillStore);
-    for (const tool of skillTools) {
-        registry.register(tool);
-    }
-
-    const skills = skillStore.list();
-    if (skills.length > 0) {
-        console.log(`   Skills loaded: ${skills.length} (${skills.map((s) => s.name).join(", ")})`);
-    }
-
-    return registry;
-}
+// Re-export public API
+export { createClawAgent, ClawAgent, LangChainToolAdapter } from "./agent.js";
+export type { AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook } from "./graph/agent-loop.js";
+export type { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
+export type { LLMProvider, LLMMessage, LLMResponse } from "./providers/llm.js";
 
 async function main() {
     const config = loadConfig();
-    const llm = createProvider(config);
-    const tools = await initializeTools();
-    const activeModel = config.provider === "openai" ? config.openaiModel : config.geminiModel;
+    const activeModel = getDefaultModel(config);
 
-    console.log(`\n🦞 ClawAgents Engine v1.0`);
-    console.log(`   Provider: ${llm.name} | Model: ${activeModel}`);
-    console.log(`   Tools: ${tools.list().map((t) => t.name).join(", ")}`);
+    const agent = await createClawAgent({
+        model: activeModel,
+        streaming: config.streaming,
+    });
+
+    const toolCount = agent.tools.list().length;
+    process.stderr.write(`ClawAgents | ${activeModel} | ${toolCount} tools\n`);
 
     // Check for --task flag for CLI mode
-    const taskIdx = process.argv.indexOf("--task");
-    if (taskIdx !== -1 && process.argv[taskIdx + 1]) {
-        const task = process.argv[taskIdx + 1]!;
+    const args = process.argv;
+    let task = "";
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--task" && i + 1 < args.length) {
+            task = args[i + 1]!;
+            break;
+        } else if (args[i]?.startsWith("--task=")) {
+            task = args[i]!.substring(7);
+            break;
+        }
+    }
 
-        const result = await runAgentGraph(task, llm, tools);
-        console.log("\n━━━ Final Result ━━━");
-        console.log(result.result);
-        console.log(`━━━ Tool calls: ${result.toolCalls} | Iterations: ${result.iterations} ━━━\n`);
+    if (task) {
+        await agent.invoke(task);
         process.exit(0);
     }
 

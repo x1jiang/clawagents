@@ -9,9 +9,9 @@ const localEnv = resolve(cwd, ".env");
 const parentEnv = resolve(cwd, "../.env");
 
 if (existsSync(localEnv)) {
-    dotenv.config({ path: localEnv, override: false });
+    dotenv.config({ path: localEnv, override: true });
 } else if (existsSync(parentEnv)) {
-    dotenv.config({ path: parentEnv, override: false });
+    dotenv.config({ path: parentEnv, override: true });
 } else {
     dotenv.config();
 }
@@ -21,37 +21,37 @@ export interface EngineConfig {
     openaiModel: string;
     geminiApiKey: string;
     geminiModel: string;
-    provider: "openai" | "gemini";
     maxTokens: number;
     contextWindow: number;
+    streaming: boolean;
 }
 
 export function loadConfig(): EngineConfig {
-    const openaiApiKey = process.env["OPENAI_API_KEY"] ?? "";
-    const geminiApiKey = process.env["GEMINI_API_KEY"] ?? "";
-
-    // Explicit override via PROVIDER env var, otherwise auto-detect
-    let provider: "openai" | "gemini";
-    const explicitProvider = process.env["PROVIDER"]?.toLowerCase();
-    if (explicitProvider === "gemini") {
-        provider = "gemini";
-    } else if (explicitProvider === "openai") {
-        provider = "openai";
-    } else if (openaiApiKey) {
-        provider = "openai";
-    } else if (geminiApiKey) {
-        provider = "gemini";
-    } else {
-        provider = "openai";
-    }
+    const streamingEnv = process.env["STREAMING"]?.toLowerCase();
+    const streaming = streamingEnv !== "0" && streamingEnv !== "false" && streamingEnv !== "no";
 
     return {
-        openaiApiKey,
+        openaiApiKey: process.env["OPENAI_API_KEY"] ?? "",
         openaiModel: process.env["OPENAI_MODEL"] ?? "gpt-5-nano",
-        geminiApiKey,
+        geminiApiKey: process.env["GEMINI_API_KEY"] ?? "",
         geminiModel: process.env["GEMINI_MODEL"] ?? "gemini-3-flash-preview",
-        provider,
-        maxTokens: 4096,
-        contextWindow: 128000,
+        maxTokens: Number(process.env["MAX_TOKENS"] ?? 8192) || 8192,
+        contextWindow: Number(process.env["CONTEXT_WINDOW"] ?? 128000) || 128000,
+        streaming,
     };
+}
+
+/** Infer provider from model name: "gemini*" → gemini, everything else → openai. */
+export function isGeminiModel(model: string): boolean {
+    return model.toLowerCase().startsWith("gemini");
+}
+
+/** Pick the default model. PROVIDER env var is a hint when both API keys exist. */
+export function getDefaultModel(config: EngineConfig): string {
+    const hint = process.env["PROVIDER"]?.toLowerCase();
+    if (hint === "gemini" && config.geminiApiKey) return config.geminiModel;
+    if (hint === "openai" && config.openaiApiKey) return config.openaiModel;
+    if (config.openaiApiKey) return config.openaiModel;
+    if (config.geminiApiKey) return config.geminiModel;
+    return config.openaiModel;
 }

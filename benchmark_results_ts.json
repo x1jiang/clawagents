@@ -1,0 +1,222 @@
+[
+  {
+    "framework": "clawagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "file_listing",
+    "success": true,
+    "wall_time": 1.436254583,
+    "tool_calls": 1,
+    "iterations": 1,
+    "result": "There are 17 files in the current directory.",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "file_listing",
+    "success": true,
+    "wall_time": 2.9108567499999998,
+    "tool_calls": 2,
+    "iterations": 6,
+    "result": "No files were found in the current directory or any accessible directory. Therefore, there are 0 files.",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "read_analyze",
+    "success": true,
+    "wall_time": 4.703360957999999,
+    "tool_calls": 2,
+    "iterations": 1,
+    "result": "The file `.env` does not exist in the current directory. Therefore, I cannot tell you what provider is configured or what model names are set.",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "read_analyze",
+    "success": true,
+    "wall_time": 1.8102672910000002,
+    "tool_calls": 1,
+    "iterations": 4,
+    "result": "I couldn't find the `.env` file. Please make sure the file exists and that I have the correct path. If the file has a different name, let me know.",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "write_file",
+    "success": true,
+    "wall_time": 2.886932999999999,
+    "tool_calls": 2,
+    "iterations": 1,
+    "result": "File `benchmark_test.txt` was created with content 'Hello from benchmark'.",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "write_file",
+    "success": true,
+    "wall_time": 3.500614542000001,
+    "tool_calls": 3,
+    "iterations": 8,
+    "result": "I have created the file `benchmark_test.txt` with the content 'Hello from benchmark'. I have confirmed its creation by reading the file.",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "multi_step",
+    "success": true,
+    "wall_time": 4.712467291999998,
+    "tool_calls": 3,
+    "iterations": 1,
+    "result": "## Files in current directory:\n- .git/\n- dist/\n- node_modules/\n- src/\n- tests/\n- .DS_Store\n- .gitignore\n- benchmark_test.txt\n- benchmark_ts.ts\n- benchmark-report.md\n- clawagent.zip\n- cli-test.log\n- js",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "multi_step",
+    "success": true,
+    "wall_time": 5.243029957999999,
+    "tool_calls": 3,
+    "iterations": 8,
+    "result": "[{\"type\":\"text\",\"text\":\"I have completed the following actions:\\n1. Listed the current directory: No files were found.\\n2. Attempted to read the `.env` file: The file was not found.\\n3. Created `summa",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "reasoning",
+    "success": true,
+    "wall_time": 2.094744458000001,
+    "tool_calls": 1,
+    "iterations": 1,
+    "result": "Here's the breakdown of the calculation:\n\n1.  17 * 23 = 391\n2.  391 + 42 = 433\n3.  433 - 15 = 418\n\nThe final answer is 418.",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gemini-2.5-flash",
+    "task": "reasoning",
+    "success": true,
+    "wall_time": 1.4350427079999972,
+    "tool_calls": 0,
+    "iterations": 2,
+    "result": "To calculate 17 * 23 + 42 - 15:\n\n1.  First, multiply 17 by 23:\n    17 * 23 = 391\n\n2.  Next, add 42 to the result:\n    391 + 42 = 433\n\n3.  Finally, subtract 15 from the result:\n    433 - 15 = 418\n\nThe ",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gpt-5-mini",
+    "task": "file_listing",
+    "success": true,
+    "wall_time": 9.940940249999995,
+    "tool_calls": 1,
+    "iterations": 1,
+    "result": "Directories:\n- .git/\n- dist/\n- node_modules/\n- src/\n- tests/\n\nFiles:\n- .DS_Store\n- .gitignore\n- benchmark_test.txt\n- benchmark_ts.ts\n- benchmark-report.md\n- clawagent.zip\n- cli-test.log\n- js_advanced.",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gpt-5-mini",
+    "task": "file_listing",
+    "success": true,
+    "wall_time": 4.954170084000005,
+    "tool_calls": 1,
+    "iterations": 4,
+    "result": "There are no files in the current directory (/) — 0 files.\n\nWould you like me to list files in a different directory or show hidden files/subdirectories?",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gpt-5-mini",
+    "task": "read_analyze",
+    "success": true,
+    "wall_time": 25.78448041699999,
+    "tool_calls": 7,
+    "iterations": 1,
+    "result": "I'll search the repo for .env-like settings (PROVIDER, OPENAI_MODEL, GEMINI_MODEL) and report what I find.\n{\"tool\":\"grep\",\"args\":{\"path\":\".\",\"pattern\":\"GEMINI_MODEL\",\"recursive\":true}}",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gpt-5-mini",
+    "task": "read_analyze",
+    "success": true,
+    "wall_time": 12.599365292000002,
+    "tool_calls": 2,
+    "iterations": 6,
+    "result": "I tried to find and read a .env in the workspace but there is no .env file here (I ran a search and it returned no matches). I can’t determine the provider or model names until I can see the file.\n\nYo",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gpt-5-mini",
+    "task": "write_file",
+    "success": true,
+    "wall_time": 15.210830083000008,
+    "tool_calls": 5,
+    "iterations": 1,
+    "result": "Created ./benchmark_test.txt — verified.\n\nContents:\nHello from benchmark\n\nFile listed in directory (20 B) and read successfully.",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gpt-5-mini",
+    "task": "write_file",
+    "success": true,
+    "wall_time": 7.70206749999999,
+    "tool_calls": 2,
+    "iterations": 6,
+    "result": "I created /benchmark_test.txt with the requested content and confirmed its contents: \"Hello from benchmark\".",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gpt-5-mini",
+    "task": "multi_step",
+    "success": true,
+    "wall_time": 27.633264292000007,
+    "tool_calls": 7,
+    "iterations": 1,
+    "result": "Actions completed:\n- Listed current directory (files/dirs shown).\n- Tried to read .env — file not found in project root.\n- Created summary.md at ./summary.md (/Users/xjiang2/Dropbox/cursor_projects/ma",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gpt-5-mini",
+    "task": "multi_step",
+    "success": true,
+    "wall_time": 24.325656583000004,
+    "tool_calls": 4,
+    "iterations": 10,
+    "result": "I looked for files in the root but the directory is empty and I couldn't find a .env file.\n\nHow would you like to proceed?\n- Option A: Upload or paste the .env file (I will read it and then create sum",
+    "error": ""
+  },
+  {
+    "framework": "clawagents_ts",
+    "model": "gpt-5-mini",
+    "task": "reasoning",
+    "success": true,
+    "wall_time": 2.6986337080000085,
+    "tool_calls": 0,
+    "iterations": 1,
+    "result": "17 * 23 + 42 - 15\n\nStep 1 — multiply:\n17 × 23 = 17 × (20 + 3) = 17×20 + 17×3 = 340 + 51 = 391\n\nStep 2 — add 42:\n391 + 42 = 433\n\nStep 3 — subtract 15:\n433 − 15 = 418\n\nFinal answer: 418",
+    "error": ""
+  },
+  {
+    "framework": "deepagents_ts",
+    "model": "gpt-5-mini",
+    "task": "reasoning",
+    "success": true,
+    "wall_time": 3.5017663750000065,
+    "tool_calls": 0,
+    "iterations": 2,
+    "result": "Step 1: 17 × 23 = (17 × 20) + (17 × 3) = 340 + 51 = 391  \nStep 2: 391 + 42 = 433  \nStep 3: 433 − 15 = 418\n\nFinal answer: 418",
+    "error": ""
+  }
+]

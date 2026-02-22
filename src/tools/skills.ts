@@ -16,6 +16,8 @@ export interface Skill {
     description: string;
     content: string;
     path: string;
+    /** Tool names the skill recommends using (from YAML `allowed-tools` field). */
+    allowedTools?: string[];
 }
 
 /**
@@ -27,6 +29,7 @@ function parseSkillFile(content: string, filePath: string): Skill {
     let name = defaultName;
     let description = "";
     let body = content;
+    let allowedTools: string[] = [];
 
     // Parse YAML frontmatter if present
     const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
@@ -39,9 +42,15 @@ function parseSkillFile(content: string, filePath: string): Skill {
 
         const descMatch = yaml.match(/^description:\s*"?([^"]+)"?$/m);
         if (descMatch) description = descMatch[1]!.trim();
+
+        // Parse allowed-tools: space-delimited string or YAML list
+        const toolsMatch = yaml.match(/^allowed-tools:\s*(.+)$/m);
+        if (toolsMatch) {
+            allowedTools = toolsMatch[1]!.split(/[\s,]+/).filter(Boolean);
+        }
     }
 
-    return { name, description, content: body.trim(), path: filePath };
+    return { name, description, content: body.trim(), path: filePath, allowedTools };
 }
 
 // ─── Skill Store ───────────────────────────────────────────────────────────
@@ -61,21 +70,21 @@ export class SkillStore {
             try {
                 const entries = await readdir(dir, { withFileTypes: true });
                 for (const entry of entries) {
-                    if (entry.isDirectory()) {
-                        // Check for SKILL.md inside subdirectory (openclaw pattern)
-                        const skillFile = resolve(dir, entry.name, "SKILL.md");
-                        if (existsSync(skillFile)) {
+                    try {
+                        if (entry.isDirectory()) {
+                            const skillFile = resolve(dir, entry.name, "SKILL.md");
+                            if (existsSync(skillFile)) {
+                                const content = await readFile(skillFile, "utf-8");
+                                const skill = parseSkillFile(content, skillFile);
+                                this.skills.set(skill.name, skill);
+                            }
+                        } else if (entry.name.endsWith(".md")) {
+                            const skillFile = resolve(dir, entry.name);
                             const content = await readFile(skillFile, "utf-8");
                             const skill = parseSkillFile(content, skillFile);
                             this.skills.set(skill.name, skill);
                         }
-                    } else if (entry.name.endsWith(".md")) {
-                        // Direct .md file (deepagents pattern)
-                        const skillFile = resolve(dir, entry.name);
-                        const content = await readFile(skillFile, "utf-8");
-                        const skill = parseSkillFile(content, skillFile);
-                        this.skills.set(skill.name, skill);
-                    }
+                    } catch { /* unreadable skill file — skip */ }
                 }
             } catch {
                 // Directory not readable, skip
@@ -104,7 +113,13 @@ export function createSkillTools(store: SkillStore): Tool[] {
             if (skills.length === 0) {
                 return { success: true, output: "No skills available." };
             }
-            const lines = skills.map((s) => `- **${s.name}**: ${s.description || "(no description)"}`);
+            const lines = skills.map((s) => {
+                let line = `- **${s.name}**: ${s.description || "(no description)"}`;
+                if (s.allowedTools && s.allowedTools.length > 0) {
+                    line += `\n  → Allowed tools: ${s.allowedTools.join(", ")}`;
+                }
+                return line;
+            });
             return { success: true, output: `Available skills (${skills.length}):\n${lines.join("\n")}` };
         },
     };

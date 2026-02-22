@@ -25,7 +25,7 @@ export const execTool: Tool = {
     },
     async execute(args): Promise<ToolResult> {
         const command = String(args["command"] ?? "");
-        const timeout = Number(args["timeout"] ?? DEFAULT_TIMEOUT_MS);
+        const timeout = Math.max(100, Number(args["timeout"] ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
 
         if (!command) {
             return { success: false, output: "", error: "No command provided" };
@@ -56,11 +56,11 @@ export const execTool: Tool = {
                 output += (output ? "\n" : "") + `[stderr] ${stderr}`;
             }
 
-            // Truncate if too long
             if (output.length > MAX_OUTPUT_CHARS) {
+                const originalLen = output.length;
                 output =
                     output.slice(0, MAX_OUTPUT_CHARS / 2) +
-                    `\n\n... [truncated ${output.length - MAX_OUTPUT_CHARS} chars] ...\n\n` +
+                    `\n\n... [truncated ${originalLen - MAX_OUTPUT_CHARS} chars] ...\n\n` +
                     output.slice(-MAX_OUTPUT_CHARS / 2);
             }
 

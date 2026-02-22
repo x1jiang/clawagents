@@ -1,0 +1,130 @@
+/**
+ * Sub-agent delegation via the `task` tool.
+ *
+ * Spawns an isolated runAgentGraph() with a fresh context window.
+ * Only the final result is returned to the parent agent.
+ *
+ * Supports typed SubAgentSpec for per-agent configuration (name, prompt, tools, etc.)
+ */
+
+import type { LLMProvider } from "../providers/llm.js";
+import type { Tool, ToolResult, ToolRegistry } from "./registry.js";
+
+/**
+ * Specification for a named sub-agent with its own configuration.
+ * When the parent dispatches a task with a matching `agent` name,
+ * these settings override the defaults.
+ */
+export interface SubAgentSpec {
+    /** Unique name for this sub-agent type (e.g., "researcher", "coder"). */
+    name: string;
+    /** Human-readable description of what this sub-agent does. */
+    description: string;
+    /** System prompt for this sub-agent. */
+    systemPrompt?: string;
+    /** Max tool rounds. Default: 5. */
+    maxIterations?: number;
+    /** Whether to use native tool calling for this sub-agent. */
+    useNativeTools?: boolean;
+}
+
+export class TaskTool implements Tool {
+    name = "task";
+    description: string;
+    parameters: Record<string, { type: string; description: string; required?: boolean }>;
+
+    constructor(
+        private llm: LLMProvider,
+        private tools: ToolRegistry,
+        private subagents: SubAgentSpec[] = [],
+    ) {
+        const agentNames = subagents.map((s) => s.name);
+        const agentList = agentNames.length > 0
+            ? ` Available specialized agents: ${agentNames.join(", ")}.`
+            : "";
+        this.description =
+            "Delegate a task to a sub-agent with its own isolated context window. " +
+            "Use for complex sub-tasks that would clutter your main context. " +
+            "The sub-agent has access to the same tools but a fresh conversation." +
+            agentList;
+        this.parameters = {
+            description: {
+                type: "string" as const,
+                description: "What the sub-agent should accomplish",
+                required: true as const,
+            },
+            agent: {
+                type: "string" as const,
+                description: `Optional: name of a specialized sub-agent to use.${agentList ? " Options: " + agentNames.join(", ") : ""}`,
+            },
+            max_iterations: {
+                type: "number" as const,
+                description: "Max tool rounds for the sub-agent. Default: 5",
+            },
+        };
+    }
+
+    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+        // Dynamic import to avoid circular dependency
+        const { runAgentGraph } = await import("../graph/agent-loop.js");
+
+        const description = String(args["description"] ?? "");
+        const agentName = args["agent"] ? String(args["agent"]) : undefined;
+        const rawIter = Number(args["max_iterations"] ?? 5);
+        const maxIter = Number.isFinite(rawIter) && rawIter > 0 ? Math.floor(rawIter) : 5;
+
+        if (!description) {
+            return { success: false, output: "", error: "No task description provided" };
+        }
+
+        // Resolve sub-agent spec by name
+        const spec = agentName
+            ? this.subagents.find((s) => s.name === agentName)
+            : undefined;
+
+        const effectiveMaxIter = spec?.maxIterations ?? maxIter;
+        const effectivePrompt = spec?.systemPrompt;
+        const effectiveNativeTools = spec?.useNativeTools ?? false;
+
+        try {
+            const state = await runAgentGraph(
+                description,
+                this.llm,
+                this.tools,
+                effectivePrompt,
+                effectiveMaxIter,
+                false,
+                128_000,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                effectiveNativeTools,
+            );
+
+            if (state.status === "error") {
+                return {
+                    success: false,
+                    output: state.result || "",
+                    error: `Sub-agent failed: ${state.result}`,
+                };
+            }
+
+            const agentLabel = spec ? `Sub-agent [${spec.name}]` : "Sub-agent";
+            return {
+                success: true,
+                output: `[${agentLabel} completed: ${state.toolCalls} tool calls, ${state.iterations} iterations]\n\n${state.result}`,
+            };
+        } catch (err) {
+            return { success: false, output: "", error: `Sub-agent error: ${String(err)}` };
+        }
+    }
+}
+
+export function createTaskTool(
+    llm: LLMProvider,
+    tools: ToolRegistry,
+    subagents: SubAgentSpec[] = [],
+): Tool {
+    return new TaskTool(llm, tools, subagents);
+}

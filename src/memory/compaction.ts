@@ -118,21 +118,23 @@ export function pruneHistoryForContextShare(params: {
     const maxHistoryShare = params.maxHistoryShare ?? 0.5;
     const budgetTokens = Math.max(1, Math.floor(params.maxContextTokens * maxHistoryShare));
 
-    let keptMessages = [...params.messages];
     const allDroppedMessages: AgentMessage[] = [];
     let droppedChunks = 0;
     let droppedTokens = 0;
+    let totalTokens = estimateMessagesTokens(params.messages);
+    let dropIdx = 0;
 
-    // Simple pruning logic based on token limits
-    while (keptMessages.length > 0 && estimateMessagesTokens(keptMessages) > budgetTokens) {
-        // Drop older messages from the beginning
-        const dropped = keptMessages.shift();
-        if (dropped) {
-            allDroppedMessages.push(dropped);
-            droppedTokens += estimateTokens(dropped);
-            droppedChunks++;
-        }
+    while (dropIdx < params.messages.length && totalTokens > budgetTokens) {
+        const msg = params.messages[dropIdx]!;
+        const msgTokens = estimateTokens(msg);
+        allDroppedMessages.push(msg);
+        droppedTokens += msgTokens;
+        totalTokens -= msgTokens;
+        droppedChunks++;
+        dropIdx++;
     }
+
+    const keptMessages = params.messages.slice(dropIdx);
 
     return {
         messages: keptMessages,
