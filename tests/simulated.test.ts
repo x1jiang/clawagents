@@ -8,12 +8,24 @@
 
 import { ToolRegistry, type Tool, type ToolResult, truncateToolOutput } from "../src/tools/registry.js";
 import {
-    runAgentGraph,
+    runAgentGraph as _runAgentGraph,
     type AgentState,
     type EventKind,
     type OnEvent,
+    type BeforeLLMHook,
+    type BeforeToolHook,
+    type AfterToolHook,
 } from "../src/graph/agent-loop.js";
 import type { LLMProvider, LLMMessage, LLMResponse, StreamOptions } from "../src/providers/llm.js";
+
+function runAgentGraph(
+    task: string, llm: LLMProvider, tools?: ToolRegistry, systemPrompt?: string,
+    maxIterations?: number, streaming?: boolean, contextWindow?: number,
+    onEvent?: OnEvent, beforeLLM?: BeforeLLMHook, beforeTool?: BeforeToolHook,
+    afterTool?: AfterToolHook, useNativeTools = false,
+) {
+    return _runAgentGraph(task, llm, tools, systemPrompt, maxIterations, streaming, contextWindow, onEvent, beforeLLM, beforeTool, afterTool, useNativeTools);
+}
 
 // ━━━ Test Harness ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -308,18 +320,17 @@ async function main() {
     // ━━━ 8. Agent Loop — Tool Loop Detection ━━━━━━━━━━━━━━━━━━━━━━━━━━
     section("8. Tool Loop Detection");
 
-    const loopLLM = new MockLLM([
-        '```json\n{"tool": "calculate", "args": {"expression": "1+1"}}\n```',
-        '```json\n{"tool": "calculate", "args": {"expression": "1+1"}}\n```',
-        '```json\n{"tool": "calculate", "args": {"expression": "1+1"}}\n```',
-        '```json\n{"tool": "calculate", "args": {"expression": "1+1"}}\n```',
-    ]);
+    const loopResponses: string[] = [];
+    for (let i = 0; i < 10; i++) {
+        loopResponses.push('```json\n{"tool": "calculate", "args": {"expression": "1+1"}}\n```');
+    }
+    const loopLLM = new MockLLM(loopResponses);
     const loopReg = new ToolRegistry();
     loopReg.register(createMathTool());
     const { events: e5, handler: h5 } = createEventCollector();
-    const state5 = await runAgentGraph("Loop forever", loopLLM, loopReg, undefined, 10, false, 128000, h5);
+    const state5 = await runAgentGraph("Loop forever", loopLLM, loopReg, undefined, 20, false, 128000, h5);
 
-    assert(state5.result.includes("loop"), "loop detection: result mentions loop");
+    assert(state5.result.includes("loop") || state5.result.includes("Loop"), "loop detection: result mentions loop");
     assert(e5.some(e => e.kind === "warn" && String(e.data.message).includes("loop")), "loop detection: warn event");
 
     // ━━━ 9. Agent Loop — Error Handling ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -474,13 +485,13 @@ async function main() {
 
     {
         const { ToolCallTracker: TCT } = await import("../src/graph/agent-loop.js");
-        const trackerKey = new TCT(12, 2);
+        const trackerKey = new TCT(12, 2, 4);
         // Record same args twice with different key order
         trackerKey.record("read_file", { path: "a.txt", mode: "r" });
         trackerKey.record("read_file", { mode: "r", path: "a.txt" });
-        // With stable stringify, these should be seen as 2 identical calls => looping at threshold 2
-        assert(trackerKey.isLooping("read_file", { path: "a.txt", mode: "r" }), "tracker: same args different order = same key");
-        assert(trackerKey.isLooping("read_file", { mode: "r", path: "a.txt" }), "tracker: reverse order also matches");
+        // With stable stringify, these should be seen as 2 identical calls => soft-looping at threshold 2
+        assert(trackerKey.isSoftLooping("read_file", { path: "a.txt", mode: "r" }), "tracker: same args different order = same key");
+        assert(trackerKey.isSoftLooping("read_file", { mode: "r", path: "a.txt" }), "tracker: reverse order also matches");
     }
 
     // ━━━ 19. Hook Exception Safety ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

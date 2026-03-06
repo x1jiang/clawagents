@@ -10,6 +10,8 @@ import { resolve } from "node:path";
 import { loadConfig, getDefaultModel } from "./config/config.js";
 import { createProvider } from "./providers/llm.js";
 import { loadMemoryFiles } from "./memory/loader.js";
+import type { SandboxBackend } from "./sandbox/backend.js";
+import { LocalBackend } from "./sandbox/local.js";
 
 // ─── LangChain Tool Adapter ──────────────────────────────────────────────────
 
@@ -72,47 +74,73 @@ export class ClawAgent {
     public systemPrompt?: string;
     public streaming: boolean;
     public useNativeTools: boolean;
+    public contextWindow: number;
     public onEvent?: OnEvent;
     public beforeLLM?: BeforeLLMHook;
     public beforeTool?: BeforeToolHook;
     public afterTool?: AfterToolHook;
+    public trajectory: boolean;
+    public rethink: boolean;
+    public learn: boolean;
+    public maxIterations: number;
+    public previewChars: number;
+    public responseChars: number;
 
     constructor(
         llm: LLMProvider,
         tools: ToolRegistry,
         systemPrompt?: string,
         streaming = true,
-        useNativeTools = false,
+        useNativeTools = true,
+        contextWindow = 1_000_000,
         onEvent?: OnEvent,
         beforeLLM?: BeforeLLMHook,
         beforeTool?: BeforeToolHook,
         afterTool?: AfterToolHook,
+        trajectory = false,
+        rethink = false,
+        learn = false,
+        maxIterations = 200,
+        previewChars = 120,
+        responseChars = 500,
     ) {
         this.llm = llm;
         this.tools = tools;
         this.systemPrompt = systemPrompt;
         this.streaming = streaming;
         this.useNativeTools = useNativeTools;
+        this.contextWindow = contextWindow;
         this.onEvent = onEvent;
         this.beforeLLM = beforeLLM;
         this.beforeTool = beforeTool;
         this.afterTool = afterTool;
+        this.trajectory = trajectory;
+        this.rethink = rethink;
+        this.learn = learn;
+        this.maxIterations = maxIterations;
+        this.previewChars = previewChars;
+        this.responseChars = responseChars;
     }
 
-    async invoke(task: string, maxIterations = 15, onEvent?: OnEvent): Promise<AgentState> {
+    async invoke(task: string, maxIterations?: number, onEvent?: OnEvent): Promise<AgentState> {
         return await runAgentGraph(
             task,
             this.llm,
             this.tools,
             this.systemPrompt,
-            maxIterations,
+            maxIterations ?? this.maxIterations,
             this.streaming,
-            128_000,
+            this.contextWindow,
             onEvent ?? this.onEvent,
             this.beforeLLM,
             this.beforeTool,
             this.afterTool,
             this.useNativeTools,
+            this.trajectory,
+            this.rethink,
+            this.learn,
+            this.previewChars,
+            this.responseChars,
         );
     }
 
@@ -184,11 +212,19 @@ export async function createClawAgent({
     tools,
     skills,
     memory,
+    sandbox,
     streaming = true,
-    contextWindow = 128_000,
-    maxTokens = 8192,
-    useNativeTools = false,
+    contextWindow,
+    maxTokens,
+    temperature,
+    useNativeTools = true,
     onEvent,
+    trajectory,
+    rethink,
+    learn,
+    maxIterations,
+    previewChars,
+    responseChars,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
@@ -196,23 +232,58 @@ export async function createClawAgent({
     tools?: Tool[];
     skills?: string | string[];
     memory?: string | string[];
+    sandbox?: SandboxBackend;
     streaming?: boolean;
     contextWindow?: number;
     maxTokens?: number;
+    temperature?: number;
     useNativeTools?: boolean;
     onEvent?: OnEvent;
+    trajectory?: boolean;
+    rethink?: boolean;
+    learn?: boolean;
+    maxIterations?: number;
+    previewChars?: number;
+    responseChars?: number;
 } = {}): Promise<ClawAgent> {
+    // ── Resolve opt-in flags ─────────────────────────────────────────
+    const envTrue = (key: string) => ["1", "true", "yes"].includes(
+        (process.env[key] ?? "").toLowerCase(),
+    );
+    const envInt = (key: string, fallback: number) => {
+        const raw = process.env[key];
+        if (raw && /^\d+$/.test(raw)) return parseInt(raw, 10);
+        return fallback;
+    };
+    const enableLearn = learn ?? envTrue("CLAW_LEARN");
+    let enableTrajectory = trajectory ?? envTrue("CLAW_TRAJECTORY");
+    if (enableLearn) enableTrajectory = true;
+    const enableRethink = rethink ?? envTrue("CLAW_RETHINK");
+    const resolvedMaxIterations = maxIterations ?? envInt("MAX_ITERATIONS", 200);
+    const resolvedPreviewChars = previewChars ?? envInt("CLAW_PREVIEW_CHARS", 120);
+    const resolvedResponseChars = responseChars ?? envInt("CLAW_RESPONSE_CHARS", 500);
+
     // ── Resolve model → LLMProvider ──────────────────────────────────
-    const llm = resolveModel(model, streaming, apiKey, contextWindow, maxTokens);
+    const llm = resolveModel(model, streaming, apiKey, contextWindow, maxTokens, temperature);
+
+    // ── Resolve sandbox backend ──────────────────────────────────────
+    const sb = sandbox ?? new LocalBackend();
 
     const registry = new ToolRegistry();
 
-    // ── Built-in tools (always available) ────────────────────────────
-    const { filesystemTools } = await import("./tools/filesystem.js");
-    const { execTools } = await import("./tools/exec.js");
+    // ── Built-in tools (backed by sandbox) ───────────────────────────
+    const { createFilesystemTools } = await import("./tools/filesystem.js");
+    const { createExecTools } = await import("./tools/exec.js");
+    const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
     const { todolistTools } = await import("./tools/todolist.js");
+    const { thinkTools } = await import("./tools/think.js");
+    const { webTools } = await import("./tools/web.js");
+    const { interactiveTools } = await import("./tools/interactive.js");
 
-    for (const tool of [...filesystemTools, ...execTools, ...todolistTools]) {
+    for (const tool of [
+        ...createFilesystemTools(sb), ...createExecTools(sb), ...todolistTools,
+        ...thinkTools, ...webTools, ...createAdvancedFsTools(sb), ...interactiveTools,
+    ]) {
         registry.register(tool);
     }
 
@@ -260,9 +331,13 @@ export async function createClawAgent({
     const memoryPaths = memory !== undefined ? toList(memory) : autoDiscoverMemory();
     const composedBeforeLLM = composeBeforeLLM(memoryPaths, skillSummaries);
 
+    // Resolve context_window from config if not provided
+    const resolvedContextWindow = contextWindow ?? loadConfig().contextWindow;
+
     const agent = new ClawAgent(
-        llm, registry, instruction, streaming, useNativeTools, onEvent,
-        composedBeforeLLM ?? undefined,
+        llm, registry, instruction, streaming, useNativeTools, resolvedContextWindow, onEvent,
+        composedBeforeLLM ?? undefined, undefined, undefined, enableTrajectory, enableRethink,
+        enableLearn, resolvedMaxIterations, resolvedPreviewChars, resolvedResponseChars,
     );
 
     // ── Sub-agent tool (always available) ────────────────────────────
@@ -280,6 +355,7 @@ function resolveModel(
     apiKey?: string,
     contextWindow?: number,
     maxTokens?: number,
+    temperature?: number,
 ): LLMProvider {
     if (model && typeof model !== "string") {
         return model;
@@ -289,6 +365,7 @@ function resolveModel(
     config.streaming = streaming;
     if (contextWindow !== undefined) config.contextWindow = contextWindow;
     if (maxTokens !== undefined) config.maxTokens = maxTokens;
+    if (temperature !== undefined) config.temperature = temperature;
 
     const activeModel = (typeof model === "string" && model) ? model : getDefaultModel(config);
 

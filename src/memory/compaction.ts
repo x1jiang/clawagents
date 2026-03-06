@@ -1,4 +1,5 @@
 import type { LLMProvider } from "../providers/llm.js";
+import { countTokens } from "../tokenizer.js";
 
 export type AgentMessage = {
     role: "system" | "user" | "assistant";
@@ -12,8 +13,8 @@ export const SAFETY_MARGIN = 1.2;
 const DEFAULT_SUMMARY_FALLBACK = "No prior history.";
 
 export function estimateTokens(message: AgentMessage): number {
-    // Rough estimation: 4 chars per token
-    return Math.ceil((message.content?.length || 0) / 4);
+    // Uses tiktoken when available; falls back to heuristic
+    return countTokens(message.content ?? "");
 }
 
 export function estimateMessagesTokens(messages: AgentMessage[]): number {

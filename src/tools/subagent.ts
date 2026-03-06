@@ -9,6 +9,8 @@
 
 import type { LLMProvider } from "../providers/llm.js";
 import type { Tool, ToolResult, ToolRegistry } from "./registry.js";
+import { enqueueCommandInLane } from "../process/command-queue.js";
+import { CommandLane } from "../process/lanes.js";
 
 /**
  * Specification for a named sub-agent with its own configuration.
@@ -32,12 +34,15 @@ export class TaskTool implements Tool {
     name = "task";
     description: string;
     parameters: Record<string, { type: string; description: string; required?: boolean }>;
+    private useQueue: boolean;
 
     constructor(
         private llm: LLMProvider,
         private tools: ToolRegistry,
         private subagents: SubAgentSpec[] = [],
+        useQueue = false,
     ) {
+        this.useQueue = useQueue;
         const agentNames = subagents.map((s) => s.name);
         const agentList = agentNames.length > 0
             ? ` Available specialized agents: ${agentNames.join(", ")}.`
@@ -77,16 +82,15 @@ export class TaskTool implements Tool {
             return { success: false, output: "", error: "No task description provided" };
         }
 
-        // Resolve sub-agent spec by name
         const spec = agentName
             ? this.subagents.find((s) => s.name === agentName)
             : undefined;
 
         const effectiveMaxIter = spec?.maxIterations ?? maxIter;
         const effectivePrompt = spec?.systemPrompt;
-        const effectiveNativeTools = spec?.useNativeTools ?? false;
+        const effectiveNativeTools = spec?.useNativeTools ?? true;
 
-        try {
+        const doRun = async () => {
             const state = await runAgentGraph(
                 description,
                 this.llm,
@@ -107,14 +111,21 @@ export class TaskTool implements Tool {
                     success: false,
                     output: state.result || "",
                     error: `Sub-agent failed: ${state.result}`,
-                };
+                } as ToolResult;
             }
 
             const agentLabel = spec ? `Sub-agent [${spec.name}]` : "Sub-agent";
             return {
                 success: true,
                 output: `[${agentLabel} completed: ${state.toolCalls} tool calls, ${state.iterations} iterations]\n\n${state.result}`,
-            };
+            } as ToolResult;
+        };
+
+        try {
+            if (this.useQueue) {
+                return await enqueueCommandInLane(CommandLane.Subagent, doRun);
+            }
+            return await doRun();
         } catch (err) {
             return { success: false, output: "", error: `Sub-agent error: ${String(err)}` };
         }
@@ -125,6 +136,7 @@ export function createTaskTool(
     llm: LLMProvider,
     tools: ToolRegistry,
     subagents: SubAgentSpec[] = [],
+    useQueue = false,
 ): Tool {
-    return new TaskTool(llm, tools, subagents);
+    return new TaskTool(llm, tools, subagents, useQueue);
 }

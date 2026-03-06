@@ -30,6 +30,7 @@ export const writeTodosTool: Tool = {
     parameters: {
         todos: {
             type: "array",
+            items: { type: "string" },
             description: 'JSON array of todo strings, e.g. ["Read file", "Fix bug", "Test"]',
             required: true,
         },

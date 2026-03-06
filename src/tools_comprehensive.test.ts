@@ -47,7 +47,7 @@ describe("lsTool", () => {
     it("dirs appear first", async () => {
         const { lsTool } = await import("./tools/filesystem.js");
         const result = await lsTool.execute({ path: tmp });
-        const lines = result.output.split("\n");
+        const lines = (result.output as string).split("\n");
         assert.ok(lines[0].includes("[DIR]"));
     });
 

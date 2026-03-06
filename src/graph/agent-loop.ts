@@ -39,10 +39,11 @@ function patchDanglingToolCalls(messages: LLMMessage[]): LLMMessage[] {
         patched.push(msg);
 
         // Look for assistant messages that contain JSON tool calls without a following [Tool Result]
-        if (msg.role === "assistant" && msg.content.startsWith('{"tool":')) {
+        if (msg.role === "assistant" && typeof msg.content === "string" && msg.content.startsWith('{"tool":')) {
             const hasResult = i + 1 < messages.length &&
                 messages[i + 1]!.role === "user" &&
-                messages[i + 1]!.content.startsWith("[Tool Result]");
+                typeof messages[i + 1]!.content === "string" &&
+                (messages[i + 1]!.content as string).startsWith("[Tool Result]");
             if (!hasResult) {
                 patched.push({
                     role: "user",
@@ -142,6 +143,7 @@ export interface AgentState {
     iterations: number;
     maxIterations: number;
     toolCalls: number;
+    trajectoryFile?: string;
 }
 
 // ─── Event System ─────────────────────────────────────────────────────────
@@ -210,20 +212,33 @@ When the user asks you to do something:
 2. After getting tool results, continue using more tools or provide the final answer.
 3. When done, provide the final answer directly. Do NOT ask if the user wants more.
 
-Keep working until the task is fully complete.`;
+Keep working until the task is fully complete.
+
+## Efficiency Rules
+- NEVER re-read a file you already have in context. Use the data from previous tool results.
+- NEVER call the same tool with the same arguments twice. If you already have the result, use it.
+- Batch independent tool calls into a single response when possible (use the array syntax).
+- Prefer fewer, well-targeted tool calls over many exploratory ones.`;
 
 // ─── Adaptive Token Estimation (learned from deepagents) ──────────────────
+// Now uses js-tiktoken for accurate BPE counting (with fallback to heuristic).
 
-const CHARS_PER_TOKEN = 4;
+import {
+    initTokenizer,
+    countTokensContent,
+    countMessagesTokens,
+    CHARS_PER_TOKEN_FALLBACK,
+} from "../tokenizer.js";
 
-function estimateTokens(text: string, multiplier: number): number {
-    return Math.ceil((text.length / CHARS_PER_TOKEN) * multiplier);
+// Keep CHARS_PER_TOKEN for the Tier-3 preflight char-budget calculation only
+const CHARS_PER_TOKEN = CHARS_PER_TOKEN_FALLBACK;
+
+function estimateTokens(text: string | any[], multiplier: number, model?: string): number {
+    return countTokensContent(text, model, multiplier);
 }
 
-function estimateMessagesTokens(messages: LLMMessage[], multiplier: number): number {
-    let total = 0;
-    for (const m of messages) total += estimateTokens(m.content, multiplier);
-    return total;
+function estimateMessagesTokens(messages: LLMMessage[], multiplier: number, model?: string): number {
+    return countMessagesTokens(messages, model, multiplier);
 }
 
 // ─── Tool Argument Truncation in Old Messages (learned from deepagents) ───
@@ -241,7 +256,7 @@ function truncateOldToolArgs(messages: LLMMessage[], protectRecent: number): LLM
 
     for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
-        if (i < cutoff && m.role === "assistant" && TRUNCATABLE_RE.test(m.content)) {
+        if (i < cutoff && m.role === "assistant" && typeof m.content === "string" && TRUNCATABLE_RE.test(m.content)) {
             if (m.content.length > MAX_ARG_LENGTH) {
                 result.push({
                     role: m.role,
@@ -275,10 +290,12 @@ export function stableStringify(obj: unknown): string {
 
 export class ToolCallTracker {
     private history: string[] = [];
+    private softWarnings = 0;
 
     constructor(
-        private windowSize = 12,
-        private maxRepeats = 3,
+        private windowSize = 30,
+        private softLimit = 3,
+        private hardLimit = 6,
     ) { }
 
     record(toolName: string, args: Record<string, unknown>): void {
@@ -286,19 +303,193 @@ export class ToolCallTracker {
         if (this.history.length > this.windowSize) this.history.shift();
     }
 
-    isLooping(toolName: string, args: Record<string, unknown>): boolean {
+    private countOccurrences(toolName: string, args: Record<string, unknown>): number {
         const key = `${toolName}:${stableStringify(args)}`;
-        return this.history.filter((h) => h === key).length >= this.maxRepeats;
+        return this.history.filter((h) => h === key).length;
     }
 
-    isLoopingBatch(calls: ParsedToolCall[]): boolean {
-        return calls.some((c) => this.isLooping(c.toolName, c.args));
+    /** Soft loop: repeated enough to warrant a warning nudge (injected into messages). */
+    isSoftLooping(toolName: string, args: Record<string, unknown>): boolean {
+        return this.countOccurrences(toolName, args) >= this.softLimit;
+    }
+
+    /** Hard loop: repeated so many times it must be stopped. */
+    isHardLooping(toolName: string, args: Record<string, unknown>): boolean {
+        return this.countOccurrences(toolName, args) >= this.hardLimit;
+    }
+
+    isSoftLoopingBatch(calls: ParsedToolCall[]): boolean {
+        return calls.some((c) => this.isSoftLooping(c.toolName, c.args));
+    }
+
+    isHardLoopingBatch(calls: ParsedToolCall[]): boolean {
+        return calls.some((c) => this.isHardLooping(c.toolName, c.args));
     }
 
     recordBatch(calls: ParsedToolCall[]): void {
         for (const c of calls) this.record(c.toolName, c.args);
     }
+
+    bumpSoftWarning(): number {
+        return ++this.softWarnings;
+    }
 }
+
+// ─── Consecutive Failure Detection ────────────────────────────────────────
+// Tracks tool-call success/failure to detect persistent failure streaks.
+// When N consecutive tool calls fail, injects a "step back and rethink"
+// message — lightweight online adaptation inspired by OpenClaw-RL's
+// next-state reward signal.
+
+const RETHINK_THRESHOLD = 3;
+const MAX_RETHINKS = 3;
+
+function rethinkMessage(n: number): string {
+    return (
+        `[System] Your last ${n} tool calls all failed. ` +
+        "Stop and reconsider your approach before trying again. " +
+        "Review the errors above, think about what went wrong, " +
+        "and try a fundamentally different strategy."
+    );
+}
+
+const SCORELESS_TOOLS = new Set([
+    "think", "todolist", "todo_write", "todo_read", "use_skill", "ask_user",
+]);
+
+class FailureTracker {
+    private results: boolean[] = [];  // true = success, false = failure
+    private rethinkCount = 0;
+
+    constructor(
+        private threshold = RETHINK_THRESHOLD,
+        private maxRethinks = MAX_RETHINKS,
+    ) {}
+
+    record(success: boolean, toolName = ""): void {
+        if (SCORELESS_TOOLS.has(toolName)) return;
+        this.results.push(success);
+    }
+
+    recordBatch(entries: Array<{ success: boolean; toolName: string }>): void {
+        for (const e of entries) this.record(e.success, e.toolName);
+    }
+
+    shouldRethink(): boolean {
+        if (this.rethinkCount >= this.maxRethinks) return false;
+        if (this.results.length < this.threshold) return false;
+        return this.results.slice(-this.threshold).every((s) => !s);
+    }
+
+    get consecutiveFailures(): number {
+        let count = 0;
+        for (let i = this.results.length - 1; i >= 0; i--) {
+            if (!this.results[i]) count++;
+            else break;
+        }
+        return count;
+    }
+
+    bumpRethink(): number {
+        this.rethinkCount++;
+        this.results.length = 0;
+        return this.rethinkCount;
+    }
+}
+
+// ─── Pre-flight Context Guard ─────────────────────────────────────────────
+
+const MAX_OVERFLOW_RETRIES = 3;
+
+function preflightContextCheck(
+    messages: LLMMessage[],
+    contextWindow: number,
+    toolDesc: string,
+    nativeSchemas: NativeToolSchema[] | undefined,
+    registry: ToolRegistry | undefined,
+    emit: OnEvent,
+    modelName?: string,
+): { messages: LLMMessage[]; toolDesc: string; nativeSchemas: NativeToolSchema[] | undefined } {
+    const resolved = modelName
+        ? resolveContextBudget(modelName, contextWindow)
+        : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
+    const budget = Math.floor(resolved.window * resolved.ratio);
+
+    let nativeSchemaTokens = 0;
+    if (nativeSchemas) {
+        const schemaText = JSON.stringify(nativeSchemas.map((s) => ({
+            name: s.name, description: s.description, parameters: s.parameters,
+        })));
+        nativeSchemaTokens = estimateTokens(schemaText, 1.0);
+    }
+
+    const payloadTokens = () => estimateMessagesTokens(messages, 1.0) + nativeSchemaTokens;
+
+    if (payloadTokens() <= budget) {
+        return { messages, toolDesc, nativeSchemas };
+    }
+
+    emit("context", {
+        message: `pre-flight: initial payload ~${payloadTokens()} tokens exceeds budget ${budget}`,
+    });
+
+    // Tier 1: Truncate parameter descriptions
+    if (toolDesc && registry) {
+        const shortParts = ["## Available Tools\n"];
+        for (const tool of registry.list()) {
+            shortParts.push(`### ${tool.name}\n${tool.description}`);
+            if (tool.parameters) {
+                const params = Object.entries(tool.parameters)
+                    .map(([k, v]) => `\`${k}\` (${v.type || "string"}${v.required ? "*" : ""})`)
+                    .join(", ");
+                shortParts.push("Parameters: " + params);
+            }
+            shortParts.push("");
+        }
+        const shortDesc = shortParts.join("\n");
+        const sysMsg = messages[0];
+        messages = [
+            { ...sysMsg, content: sysMsg.content.replace(toolDesc, shortDesc) },
+            ...messages.slice(1),
+        ];
+        toolDesc = shortDesc;
+        emit("context", { message: `tier-1: shortened tool descriptions -> ~${payloadTokens()} tokens` });
+    }
+
+    if (payloadTokens() <= budget) return { messages, toolDesc, nativeSchemas };
+
+    // Tier 2: Drop text tool descriptions if native schemas exist
+    if (toolDesc && nativeSchemas) {
+        const sysMsg = messages[0];
+        messages = [
+            { ...sysMsg, content: sysMsg.content.replace(toolDesc, "").trim() },
+            ...messages.slice(1),
+        ];
+        toolDesc = "";
+        emit("context", { message: `tier-2: removed text tool descriptions -> ~${payloadTokens()} tokens` });
+    }
+
+    if (payloadTokens() <= budget) return { messages, toolDesc, nativeSchemas };
+
+    // Tier 3: Truncate system prompt
+    const sysContent = messages[0].content;
+    const userTokens = messages.length > 1 ? estimateTokens(messages[1].content, 1.0) : 0;
+    const maxSysChars = Math.floor((budget - nativeSchemaTokens - userTokens) * CHARS_PER_TOKEN * 0.8);
+    if (maxSysChars > 200 && sysContent.length > maxSysChars) {
+        const truncated = sysContent.slice(0, maxSysChars) + "\n\n...(system prompt truncated to fit context window)";
+        messages = [{ ...messages[0], content: truncated }, ...messages.slice(1)];
+        emit("context", { message: `tier-3: truncated system prompt -> ~${payloadTokens()} tokens` });
+    }
+
+    if (payloadTokens() > budget) {
+        emit("warn", {
+            message: `pre-flight: payload still ~${payloadTokens()} tokens after all shedding (budget ${budget}). Consider increasing CONTEXT_WINDOW or reducing tools/instruction.`,
+        });
+    }
+
+    return { messages, toolDesc, nativeSchemas };
+}
+
 
 // ─── Context Window Guard with Auto-Compaction ────────────────────────────
 
@@ -311,11 +502,15 @@ async function compactIfNeeded(
     llm: LLMProvider,
     emit: OnEvent,
     tokenMultiplier: number,
+    modelName?: string,
 ): Promise<LLMMessage[]> {
     // Phase 1: truncate tool args in older messages (cheap, no LLM call)
     messages = truncateOldToolArgs(messages, RECENT_PROTECTED_COUNT);
 
-    const budget = Math.floor(contextWindow * CONTEXT_BUDGET_RATIO);
+    const { window: effectiveWindow, ratio } = modelName
+        ? resolveContextBudget(modelName, contextWindow)
+        : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
+    const budget = Math.floor(effectiveWindow * ratio);
     const currentTokens = estimateMessagesTokens(messages, tokenMultiplier);
 
     if (currentTokens <= budget) return messages;
@@ -385,9 +580,32 @@ function offloadHistory(messages: LLMMessage[]): string | null {
     }
 }
 
+// ─── Truncated JSON Detection ─────────────────────────────────────────────
+
+const TRUNCATED_JSON_RE = /\{\s*"tool"\s*:/;
+
+function looksLikeTruncatedJson(text: string): boolean {
+    const stripped = text.trim();
+    if (!stripped || !TRUNCATED_JSON_RE.test(stripped)) return false;
+    try {
+        const parsed = JSON.parse(stripped);
+        if (typeof parsed === "object" && parsed !== null) return false;
+    } catch { /* not valid JSON */ }
+    // Check fence-wrapped
+    const fenceRe = /```(?:json)?\s*\n?(.*?)(?:```|$)/gs;
+    let m: RegExpExecArray | null;
+    while ((m = fenceRe.exec(stripped)) !== null) {
+        const inner = m[1].trim();
+        if (TRUNCATED_JSON_RE.test(inner)) {
+            try { JSON.parse(inner); return false; } catch { return true; }
+        }
+    }
+    return true;
+}
+
 // ─── ReAct Loop ───────────────────────────────────────────────────────────
 
-const MAX_TOOL_ROUNDS = 15;
+const MAX_TOOL_ROUNDS = 1000;
 
 export async function runAgentGraph(
     task: string,
@@ -396,28 +614,60 @@ export async function runAgentGraph(
     systemPrompt?: string,
     maxIterations = MAX_TOOL_ROUNDS,
     streaming = true,
-    contextWindow = 128_000,
+    contextWindow = 1_000_000,
     onEvent?: OnEvent,
     beforeLLM?: BeforeLLMHook,
     beforeTool?: BeforeToolHook,
     afterTool?: AfterToolHook,
-    useNativeTools = false,
+    useNativeTools = true,
+    trajectory = false,
+    rethink = false,
+    learn = false,
+    previewChars = 120,
+    responseChars = 500,
 ): Promise<AgentState> {
     const registry = tools;
-    const nativeSchemas: NativeToolSchema[] | undefined =
+    let nativeSchemas: NativeToolSchema[] | undefined =
         useNativeTools && registry ? registry.toNativeSchemas() : undefined;
-    const toolDesc = (!useNativeTools && registry) ? registry.describeForLLM() : "";
+    let toolDesc = (!useNativeTools && registry) ? registry.describeForLLM() : "";
     const loopTracker = new ToolCallTracker();
+    const failureTracker = rethink ? new FailureTracker() : undefined;
     const emit = onEvent ?? defaultOnEvent;
 
-    let tokenMultiplier = 1.0;
+    // Trajectory recorder (opt-in; learn implies trajectory)
+    let recorder: import("../trajectory/recorder.js").TrajectoryRecorder | undefined;
+    if (trajectory || learn) {
+        const { TrajectoryRecorder } = await import("../trajectory/recorder.js");
+        recorder = new TrajectoryRecorder(task, "", responseChars);
+    }
 
-    const promptToUse = systemPrompt || BASE_SYSTEM_PROMPT;
+    let tokenMultiplier = 1.0;
+    let resolvedModelName: string | undefined;
+
+    let promptToUse = systemPrompt || BASE_SYSTEM_PROMPT;
+
+    // PTRL Layer 1: Pre-run lesson injection
+    if (learn) {
+        const { buildLessonPreamble } = await import("../trajectory/lessons.js");
+        const preamble = buildLessonPreamble();
+        if (preamble) {
+            promptToUse = promptToUse + preamble;
+            emit("context", { message: "PTRL: injected lessons from past runs" });
+        }
+    }
 
     let messages: LLMMessage[] = [
         { role: "system", content: promptToUse + "\n\n" + toolDesc },
         { role: "user", content: task },
     ];
+
+    // Initialize tokenizer encoder for accurate token counting
+    await initTokenizer(resolvedModelName);
+
+    // Pre-flight: ensure initial payload fits in context window
+    ({ messages, toolDesc, nativeSchemas } = preflightContextCheck(
+        messages, contextWindow, toolDesc, nativeSchemas, registry, emit,
+    ));
 
     const state: AgentState = {
         messages,
@@ -429,6 +679,7 @@ export async function runAgentGraph(
         toolCalls: 0,
     };
 
+    let overflowRetries = 0;
     const ac = new AbortController();
     const onSigint = () => {
         emit("warn", { message: "interrupted" });
@@ -453,7 +704,7 @@ export async function runAgentGraph(
 
             // Patch dangling tool calls before sending to LLM
             messages = patchDanglingToolCalls(messages);
-            messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier);
+            messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
 
             if (beforeLLM) {
                 try {
@@ -470,13 +721,24 @@ export async function runAgentGraph(
                     ? { onChunk: (chunk: string) => buf.push(chunk), signal: ac.signal, tools: nativeSchemas }
                     : nativeSchemas ? { tools: nativeSchemas } : undefined;
                 response = await llm.chat(messages, chatOptions);
+                if (!resolvedModelName && response.model) resolvedModelName = response.model;
             } catch (err) {
                 const errMsg = String(err);
                 if (errMsg.toLowerCase().includes("context") || errMsg.toLowerCase().includes("token")) {
+                    overflowRetries++;
+                    if (overflowRetries > MAX_OVERFLOW_RETRIES) {
+                        emit("error", {
+                            phase: "llm_call",
+                            message: `context overflow persists after ${MAX_OVERFLOW_RETRIES} retries. Increase CONTEXT_WINDOW, reduce tools, or shorten your instruction.`,
+                        });
+                        state.status = "error";
+                        state.result = errMsg;
+                        break;
+                    }
                     const observedRatio = contextWindow / Math.max(estimateMessagesTokens(messages, 1.0), 1);
                     tokenMultiplier = Math.min(observedRatio * 1.1, 3.0);
-                    emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)}` });
-                    messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier);
+                    emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)} (retry ${overflowRetries}/${MAX_OVERFLOW_RETRIES})` });
+                    messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
                     continue;
                 }
                 emit("error", { phase: "llm_call", message: errMsg });
@@ -493,11 +755,29 @@ export async function runAgentGraph(
             }
 
             // Use exclusively native or text-based tool calls based on user-provided mode
+            const nativeToolCallObjects = useNativeTools ? (response.toolCalls ?? []) : [];
             const toolCalls = useNativeTools
-                ? (response.toolCalls?.map((tc) => ({ toolName: tc.toolName, args: tc.args })) ?? [])
+                ? nativeToolCallObjects.map((tc) => ({ toolName: tc.toolName, args: tc.args }))
                 : (registry?.parseToolCalls(response.content) ?? []);
 
             if (toolCalls.length === 0) {
+                if (!useNativeTools && looksLikeTruncatedJson(response.content)) {
+                    emit("warn", { message: "truncated JSON tool call detected — asking LLM to retry" });
+                    messages.push({ role: "assistant", content: response.content });
+                    messages.push({
+                        role: "user",
+                        content: "Your previous response was cut off mid-JSON. Please resend the complete tool call as valid JSON.",
+                    });
+                    continue;
+                }
+
+                if (recorder) {
+                    recorder.recordTurn(
+                        response.content || "",
+                        response.model,
+                        response.tokensUsed,
+                    );
+                }
                 state.result = response.content;
                 state.status = "done";
                 state.iterations += 1;
@@ -506,7 +786,7 @@ export async function runAgentGraph(
                 break;
             }
 
-            if (loopTracker.isLoopingBatch(toolCalls)) {
+            if (loopTracker.isHardLoopingBatch(toolCalls)) {
                 const names = toolCalls.map((c) => c.toolName).join(", ");
                 emit("warn", { message: `tool loop detected (${names}) — breaking` });
                 state.status = "done";
@@ -515,8 +795,25 @@ export async function runAgentGraph(
                 break;
             }
 
+            if (loopTracker.isSoftLoopingBatch(toolCalls)) {
+                loopTracker.recordBatch(toolCalls);
+                const n = loopTracker.bumpSoftWarning();
+                const repeatedNames = toolCalls
+                    .filter((c) => loopTracker.isSoftLooping(c.toolName, c.args))
+                    .map((c) => c.toolName)
+                    .join(", ");
+                emit("warn", { message: `repeated tool call warning #${n}: ${repeatedNames}` });
+                messages.push({
+                    role: "user",
+                    content: `[System] You are re-calling ${repeatedNames} with the same arguments. You already have the result in the conversation above. Use the existing data instead of re-reading. If you believe the task is complete, provide your final answer now.`,
+                });
+                state.iterations += 1;
+                continue;
+            }
+
             if (toolCalls.length === 1) {
                 const call = toolCalls[0]!;
+                const nativeTc = nativeToolCallObjects[0];
                 emit("tool_call", { name: call.toolName });
 
                 if (beforeTool) {
@@ -548,22 +845,78 @@ export async function runAgentGraph(
                 const rawOutput = toolResult.success
                     ? toolResult.output
                     : `Error: ${toolResult.error}`;
-                const toolOutput = evictLargeToolResult(call.toolName, rawOutput);
+
+                let toolOutput: string | any[];
+                let preview: string;
+                if (typeof rawOutput !== "string") {
+                    toolOutput = rawOutput;
+                    preview = "[Multimodal Array Content]";
+                } else {
+                    toolOutput = evictLargeToolResult(call.toolName, rawOutput);
+                    preview = toolOutput.slice(0, previewChars);
+                }
 
                 emit("tool_result", {
                     name: call.toolName,
                     success: toolResult.success,
-                    preview: toolOutput.slice(0, 120),
+                    preview,
                 });
 
-                messages.push({
-                    role: "assistant",
-                    content: `{"tool": "${call.toolName}", "args": ${JSON.stringify(call.args)}}`,
-                });
-                messages.push({
-                    role: "user",
-                    content: `[Tool Result] ${toolOutput}`,
-                });
+                // ── Failure tracking + trajectory ──
+                failureTracker?.record(toolResult.success, call.toolName);
+                if (recorder) {
+                    recorder.recordTurn(
+                        response.content || "",
+                        response.model,
+                        response.tokensUsed,
+                        [{
+                            toolName: call.toolName,
+                            args: call.args,
+                            success: toolResult.success,
+                            outputPreview: typeof preview === "string" ? preview : "[multimodal]",
+                            error: !toolResult.success ? toolResult.error : undefined,
+                        }],
+                    );
+                }
+
+                // Use proper tool role messages when native tools are enabled
+                if (useNativeTools && nativeTc?.toolCallId) {
+                    messages.push({
+                        role: "assistant",
+                        content: response.content || "",
+                        toolCallsMeta: [{ id: nativeTc.toolCallId, name: call.toolName, args: call.args }],
+                        ...(response.geminiParts ? { geminiParts: response.geminiParts } : {}),
+                    });
+                    const toolContent = typeof toolOutput === "string" ? toolOutput : JSON.stringify(toolOutput);
+                    messages.push({
+                        role: "tool",
+                        content: toolContent,
+                        toolCallId: nativeTc.toolCallId,
+                    });
+                } else {
+                    messages.push({
+                        role: "assistant",
+                        content: `{"tool": "${call.toolName}", "args": ${JSON.stringify(call.args)}}`,
+                    });
+                    messages.push({
+                        role: "user",
+                        content: typeof toolOutput === "string" ? `[Tool Result] ${toolOutput}` : toolOutput as any,
+                    });
+                }
+
+                // ── Rethink injection on consecutive failures ──
+                if (failureTracker?.shouldRethink()) {
+                    const nFails = failureTracker.consecutiveFailures;
+                    const rethinkNum = failureTracker.bumpRethink();
+                    emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive tool failures` });
+                    let rethinkMsg = rethinkMessage(nFails);
+                    if (learn) {
+                        const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
+                        rethinkMsg = buildRethinkWithLessons(rethinkMsg);
+                    }
+                    messages.push({ role: "user", content: rethinkMsg });
+                }
+
             } else {
                 let approvedCalls = toolCalls;
                 if (beforeTool) {
@@ -592,6 +945,7 @@ export async function runAgentGraph(
                 state.toolCalls += approvedCalls.length;
 
                 const callSummaries: string[] = [];
+                const toolOutputs: string[] = [];
                 for (let j = 0; j < approvedCalls.length; j++) {
                     const call = approvedCalls[j]!;
                     let result = results[j]!;
@@ -604,23 +958,112 @@ export async function runAgentGraph(
                         } catch (hookErr) { emit("warn", { message: `afterTool hook error: ${hookErr}` }); }
                     }
                     const rawOut = result.success ? result.output : `Error: ${result.error}`;
-                    const output = evictLargeToolResult(call.toolName, rawOut);
+                    let output: string | any[];
+                    let preview: string;
+                    if (typeof rawOut !== "string") {
+                        output = rawOut;
+                        preview = "[Multimodal Array Content]";
+                    } else {
+                        output = evictLargeToolResult(call.toolName, rawOut);
+                        preview = output.slice(0, previewChars);
+                    }
                     emit("tool_result", {
                         name: call.toolName,
                         success: result.success,
-                        preview: output.slice(0, 120),
+                        preview,
                     });
-                    callSummaries.push(`${call.toolName}(${JSON.stringify(call.args)}) => ${output}`);
+
+                    if (typeof output === "string") {
+                        callSummaries.push(`${call.toolName}(${JSON.stringify(call.args)}) => ${output}`);
+                        toolOutputs.push(output);
+                    } else {
+                        callSummaries.push(`${call.toolName}(${JSON.stringify(call.args)}) => [Multimodal Output Length: ${output.length}]`);
+                        callSummaries.push(JSON.stringify(output));
+                        toolOutputs.push(JSON.stringify(output));
+                    }
                 }
 
-                const toolCallStr = JSON.stringify(
-                    approvedCalls.map((c) => ({ tool: c.toolName, args: c.args })),
+                // ── Failure tracking + trajectory (parallel) ──
+                failureTracker?.recordBatch(
+                    approvedCalls.map((c, j) => ({ success: results[j]!.success, toolName: c.toolName })),
                 );
-                messages.push({ role: "assistant", content: toolCallStr });
-                messages.push({
-                    role: "user",
-                    content: `[Tool Results]\n${callSummaries.join("\n")}`,
-                });
+                if (recorder) {
+                    const tcRecords = approvedCalls.map((call, j) => {
+                        const r = results[j]!;
+                        const rawPreview = r.success
+                            ? (typeof r.output === "string" ? r.output : "[multimodal]")
+                            : (r.error || "");
+                        return {
+                            toolName: call.toolName,
+                            args: call.args,
+                            success: r.success,
+                            outputPreview: rawPreview.slice(0, previewChars),
+                            error: !r.success ? r.error : undefined,
+                        };
+                    });
+                    recorder.recordTurn(
+                        response.content || "",
+                        response.model,
+                        response.tokensUsed,
+                        tcRecords,
+                    );
+                }
+
+                // Use proper tool role messages when native tools are enabled
+                if (useNativeTools && nativeToolCallObjects.length > 0) {
+                    // Build mapping: approved call index -> native tool call object
+                    // (handles filtered parallel calls where approvedCalls is a subset of toolCalls)
+                    const nativeTcMap: Record<number, typeof nativeToolCallObjects[number]> = {};
+                    let approvedIdx = 0;
+                    for (let i = 0; i < toolCalls.length && approvedIdx < approvedCalls.length; i++) {
+                        if (toolCalls[i] === approvedCalls[approvedIdx]) {
+                            if (i < nativeToolCallObjects.length) {
+                                nativeTcMap[approvedIdx] = nativeToolCallObjects[i]!;
+                            }
+                            approvedIdx++;
+                        }
+                    }
+                    const tcMeta = approvedCalls.map((call, idx) => {
+                        const ntc = nativeTcMap[idx];
+                        return { id: ntc?.toolCallId || `fallback_${idx}`, name: call.toolName, args: call.args };
+                    });
+                    messages.push({
+                        role: "assistant",
+                        content: response.content || "",
+                        toolCallsMeta: tcMeta,
+                        ...(response.geminiParts ? { geminiParts: response.geminiParts } : {}),
+                    });
+                    for (let idx = 0; idx < approvedCalls.length; idx++) {
+                        const ntc = nativeTcMap[idx];
+                        messages.push({
+                            role: "tool",
+                            content: toolOutputs[idx] ?? "",
+                            toolCallId: ntc?.toolCallId || `fallback_${idx}`,
+                        });
+                    }
+                } else {
+                    const toolCallStr = JSON.stringify(
+                        approvedCalls.map((c) => ({ tool: c.toolName, args: c.args })),
+                    );
+                    messages.push({ role: "assistant", content: toolCallStr });
+                    messages.push({
+                        role: "user",
+                        content: `[Tool Results]\n${callSummaries.join("\n")}`,
+                    });
+                }
+
+                // ── Rethink injection on consecutive failures (parallel) ──
+                if (failureTracker?.shouldRethink()) {
+                    const nFails = failureTracker.consecutiveFailures;
+                    const rethinkNum = failureTracker.bumpRethink();
+                    emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive tool failures` });
+                    let rethinkMsg = rethinkMessage(nFails);
+                    if (learn) {
+                        const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
+                        rethinkMsg = buildRethinkWithLessons(rethinkMsg);
+                    }
+                    messages.push({ role: "user", content: rethinkMsg });
+                }
             }
         }
 
@@ -640,6 +1083,28 @@ export async function runAgentGraph(
 
     const elapsed = (Date.now() - t0) / 1000;
     state.messages = messages;
+
+    // ── Finalize trajectory ──
+    let runSummary: import("../trajectory/recorder.js").RunSummary | undefined;
+    if (recorder) {
+        const outcome = (state.status as string) === "running" ? "success" : state.status;
+        runSummary = recorder.finalize(outcome);
+        state.trajectoryFile = runSummary.trajectoryFile;
+        emit("context", { message: `trajectory saved to ${runSummary.trajectoryFile}` });
+    }
+
+    // ── PTRL Layer 3: Post-run self-analysis ──
+    if (learn && recorder && runSummary) {
+        try {
+            const { extractLessons, saveLessons } = await import("../trajectory/lessons.js");
+            const lessonsText = await extractLessons(llm, runSummary, recorder.getTurns());
+            if (lessonsText) {
+                saveLessons(lessonsText, runSummary.task, runSummary.outcome);
+                emit("context", { message: "PTRL: extracted and saved lessons from this run" });
+            }
+        } catch { /* best effort */ }
+    }
+
     emit("agent_done", {
         tool_calls: state.toolCalls,
         iterations: state.iterations,

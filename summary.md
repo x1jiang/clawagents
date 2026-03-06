@@ -1,11 +1,11 @@
-Summary of current directory
+Project Summary
 
 Files and directories:
-- .git/ (dir)
-- dist/ (dir)
-- node_modules/ (dir)
-- src/ (dir)
-- tests/ (dir)
+- .git/ (directory)
+- dist/ (directory)
+- node_modules/ (directory)
+- src/ (directory)
+- tests/ (directory)
 - .DS_Store
 - .gitignore
 - benchmark_test.txt
@@ -25,8 +25,8 @@ Files and directories:
 - tsconfig.json
 - typescript-project-report.md
 
-Provider: NOT FOUND (no .env file present)
+Provider:
+- .env not found in the repository; provider could not be determined.
 
 Notes:
-- The .env file was not found in the project root, so provider could not be determined.
-- This summary.md has been created/updated to reflect the current directory listing.
+- If you want the provider included, add a .env file with a PROVIDER entry (e.g., PROVIDER=aws) or tell me the provider value and I will update this file.

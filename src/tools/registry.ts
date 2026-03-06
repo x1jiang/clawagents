@@ -16,14 +16,14 @@
 
 export interface ToolResult {
     success: boolean;
-    output: string;
+    output: string | any[];
     error?: string;
 }
 
 export interface Tool {
     name: string;
     description: string;
-    parameters: Record<string, { type: string; description: string; required?: boolean }>;
+    parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>;
     execute(args: Record<string, unknown>): Promise<ToolResult>;
 }
 
@@ -40,9 +40,10 @@ const TRUNCATION_TAIL_CHARS = 2_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 120_000;
 
 export function truncateToolOutput(
-    output: string,
+    output: string | any[],
     maxChars = MAX_TOOL_OUTPUT_CHARS,
-): string {
+): string | any[] {
+    if (typeof output !== "string") return output;
     if (output.length <= maxChars) return output;
     const head = output.slice(0, TRUNCATION_HEAD_CHARS);
     const tail = output.slice(-TRUNCATION_TAIL_CHARS);

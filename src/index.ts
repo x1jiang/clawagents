@@ -16,6 +16,12 @@ export { createClawAgent, ClawAgent, LangChainToolAdapter } from "./agent.js";
 export type { AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook } from "./graph/agent-loop.js";
 export type { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
 export type { LLMProvider, LLMMessage, LLMResponse } from "./providers/llm.js";
+export { TrajectoryRecorder } from "./trajectory/recorder.js";
+export type { TurnRecord, RunSummary, ToolCallRecord } from "./trajectory/recorder.js";
+export {
+    extractLessons, saveLessons, loadLessons,
+    buildLessonPreamble, buildRethinkWithLessons,
+} from "./trajectory/lessons.js";
 
 async function main() {
     const config = loadConfig();

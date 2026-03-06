@@ -22,6 +22,7 @@ export interface EngineConfig {
     geminiApiKey: string;
     geminiModel: string;
     maxTokens: number;
+    temperature: number;
     contextWindow: number;
     streaming: boolean;
 }
@@ -36,7 +37,8 @@ export function loadConfig(): EngineConfig {
         geminiApiKey: process.env["GEMINI_API_KEY"] ?? "",
         geminiModel: process.env["GEMINI_MODEL"] ?? "gemini-3-flash-preview",
         maxTokens: Number(process.env["MAX_TOKENS"] ?? 8192) || 8192,
-        contextWindow: Number(process.env["CONTEXT_WINDOW"] ?? 128000) || 128000,
+        temperature: Number(process.env["TEMPERATURE"] ?? 0),
+        contextWindow: Number(process.env["CONTEXT_WINDOW"] ?? 1000000) || 1000000,
         streaming,
     };
 }
