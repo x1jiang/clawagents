@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.13.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.14.0**
 
 ## Quick Start
 
@@ -253,6 +253,13 @@ Run summaries appended to `.clawagents/trajectories/runs.jsonl`:
 | `CLAW_RESPONSE_CHARS` | `500` | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.14.0 — SkyRL-Inspired PTRL Improvements
+- **Quality gate for lesson extraction** — lessons only extracted from mixed-outcome runs (SkyRL GRPO-inspired dynamic sampling)
+- **Lesson staleness decay** — lessons timestamped + model-tagged; `loadLessons(maxChars, maxAgeS)` filters stale lessons
+- **Format vs. logic failure classification** — tool failures classified as `"format"` or `"logic"`; rethink messages include type-specific guidance
+- **Per-step reward attribution** — `TurnRecord` gains `observationContext`, `productivityScore`; `RunSummary` gains `formatFailures`, `logicFailures`, `hasMixedOutcomes`, `finishReason`
+- **Enhanced self-analysis prompt** — failure type breakdown and productivity scores for targeted lesson extraction
 
 ### v5.13.0 — Prompt-Time Reinforcement Learning (PTRL)
 - **PTRL: Post-run self-analysis** — LLM reviews its own trajectory and extracts actionable lessons to `.clawagents/lessons.md`

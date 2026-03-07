@@ -865,6 +865,15 @@ export async function runAgentGraph(
                 // ── Failure tracking + trajectory ──
                 failureTracker?.record(toolResult.success, call.toolName);
                 if (recorder) {
+                    // Feature 4: capture observation context
+                    let obsCtx = "";
+                    for (let mi = messages.length - 1; mi >= 0; mi--) {
+                        const mm = messages[mi]!;
+                        if ((mm.role === "user" || mm.role === "tool") && typeof mm.content === "string" && mm.content.startsWith("[Tool Result]")) {
+                            obsCtx = mm.content.slice(0, 300);
+                            break;
+                        }
+                    }
                     recorder.recordTurn(
                         response.content || "",
                         response.model,
@@ -876,6 +885,8 @@ export async function runAgentGraph(
                             outputPreview: typeof preview === "string" ? preview : "[multimodal]",
                             error: !toolResult.success ? toolResult.error : undefined,
                         }],
+                        undefined,
+                        obsCtx,
                     );
                 }
 
@@ -912,7 +923,9 @@ export async function runAgentGraph(
                     let rethinkMsg = rethinkMessage(nFails);
                     if (learn) {
                         const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
-                        rethinkMsg = buildRethinkWithLessons(rethinkMsg);
+                        const fmtCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "format").length, 0) : 0;
+                        const logicCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "logic").length, 0) : 0;
+                        rethinkMsg = buildRethinkWithLessons(rethinkMsg, fmtCnt, logicCnt);
                     }
                     messages.push({ role: "user", content: rethinkMsg });
                 }
@@ -1001,11 +1014,22 @@ export async function runAgentGraph(
                             error: !r.success ? r.error : undefined,
                         };
                     });
+                    // Feature 4: capture observation context
+                    let obsCtx = "";
+                    for (let mi = messages.length - 1; mi >= 0; mi--) {
+                        const mm = messages[mi]!;
+                        if ((mm.role === "user" || mm.role === "tool") && typeof mm.content === "string" && mm.content.startsWith("[Tool Result")) {
+                            obsCtx = mm.content.slice(0, 300);
+                            break;
+                        }
+                    }
                     recorder.recordTurn(
                         response.content || "",
                         response.model,
                         response.tokensUsed,
                         tcRecords,
+                        undefined,
+                        obsCtx,
                     );
                 }
 
@@ -1060,7 +1084,9 @@ export async function runAgentGraph(
                     let rethinkMsg = rethinkMessage(nFails);
                     if (learn) {
                         const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
-                        rethinkMsg = buildRethinkWithLessons(rethinkMsg);
+                        const fmtCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "format").length, 0) : 0;
+                        const logicCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "logic").length, 0) : 0;
+                        rethinkMsg = buildRethinkWithLessons(rethinkMsg, fmtCnt, logicCnt);
                     }
                     messages.push({ role: "user", content: rethinkMsg });
                 }
@@ -1093,14 +1119,23 @@ export async function runAgentGraph(
         emit("context", { message: `trajectory saved to ${runSummary.trajectoryFile}` });
     }
 
-    // ── PTRL Layer 3: Post-run self-analysis ──
+    // ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
     if (learn && recorder && runSummary) {
         try {
-            const { extractLessons, saveLessons } = await import("../trajectory/lessons.js");
-            const lessonsText = await extractLessons(llm, runSummary, recorder.getTurns());
-            if (lessonsText) {
-                saveLessons(lessonsText, runSummary.task, runSummary.outcome);
-                emit("context", { message: "PTRL: extracted and saved lessons from this run" });
+            const { extractLessons, saveLessons, shouldExtractLessons } = await import("../trajectory/lessons.js");
+
+            // Feature 1: Quality gate — only extract lessons from informative runs
+            if (shouldExtractLessons(runSummary)) {
+                const lessonsText = await extractLessons(llm, runSummary, recorder.getTurns());
+                if (lessonsText) {
+                    saveLessons(lessonsText, runSummary.task, runSummary.outcome, runSummary.model);
+                    emit("context", { message: "PTRL: extracted and saved lessons from this run" });
+                }
+            } else {
+                emit("context", {
+                    message: `PTRL: skipped lesson extraction (quality=${runSummary.quality}, ` +
+                        `mixed=${runSummary.hasMixedOutcomes}, score=${runSummary.runScore})`,
+                });
             }
         } catch { /* best effort */ }
     }

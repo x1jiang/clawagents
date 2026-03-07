@@ -37,6 +37,7 @@ export interface ToolCallRecord {
     outputPreview: string;
     error?: string;
     durationMs?: number;
+    failureType?: string;     // "format" | "logic" | "" (Feature 3)
 }
 
 export interface TurnRecord {
@@ -49,6 +50,8 @@ export interface TurnRecord {
     toolCalls: ToolCallRecord[];
     score: number;            // weighted turn score
     cumulativeScore: number;
+    observationContext: string;        // what agent saw before deciding (Feature 4)
+    productivityScore: number;        // per-step productivity: -1.0 to 1.0 (Feature 4)
     metadata: Record<string, unknown>;
 }
 
@@ -65,9 +68,54 @@ export interface RunSummary {
     runScore: number;         // discrete band: -1, 0, +1, +2, +3
     quality: string;          // "clean" | "noisy" | "failed"
     midRunFailures: number;
+    formatFailures: number;   // count of format-type failures (Feature 3)
+    logicFailures: number;    // count of logic-type failures (Feature 3)
+    hasMixedOutcomes: boolean; // True if run had both successes and failures (Feature 1)
+    finishReason: string;     // why the run ended (Feature 4)
     durationS: number;
     tokensTotal: number;
     trajectoryFile: string;
+}
+
+// ─── Feature 3: Format vs. Logic Failure Classification ───────────────────
+
+const FORMAT_ERROR_PATTERNS = [
+    "invalid json", "json decode", "json parse", "unexpected token",
+    "missing required", "unknown tool", "unrecognized tool",
+    "no tool named", "expected string", "expected number",
+    "not a valid", "malformed", "syntax error in args",
+    "missing parameter", "unknown parameter", "extra parameter",
+];
+
+export function classifyFailure(toolName: string, error?: string, output?: string): string {
+    if (!error && !output) return "unknown";
+    const text = ((error ?? "") + " " + (output ?? "")).toLowerCase();
+    for (const pattern of FORMAT_ERROR_PATTERNS) {
+        if (text.includes(pattern)) return "format";
+    }
+    return "logic";
+}
+
+// ─── Feature 4: Per-Step Productivity Scoring ─────────────────────────────
+
+function computeProductivity(
+    calls: ToolCallRecord[],
+    prevCumulative: number,
+): number {
+    if (calls.length === 0) return 0;
+
+    const scored = calls.filter((c) => !SCORELESS_TOOLS.has(c.toolName));
+    if (scored.length === 0) return 0;
+
+    const successes = scored.filter((c) => c.success).length;
+    const failures = scored.length - successes;
+    let base = (successes - failures) / scored.length;
+
+    if (prevCumulative < 0 && base > 0) {
+        base = Math.min(base + 0.2, 1.0);
+    }
+
+    return Math.round(base * 100) / 100;
 }
 
 function scoreTurn(calls: ToolCallRecord[]): number {
@@ -120,6 +168,8 @@ export class TrajectoryRecorder {
     private cumulativeScore = 0;
     private totalTokens = 0;
     private midRunFailures = 0;
+    private hasSuccesses = false;
+    private hasFailures = false;
     private filePath: string;
     private t0: number;
     private responseChars: number;
@@ -146,13 +196,26 @@ export class TrajectoryRecorder {
         tokensUsed: number,
         toolCalls?: ToolCallRecord[],
         metadata?: Record<string, unknown>,
+        observationContext?: string,
     ): TurnRecord {
         if (model && !this.model) this.model = model;
 
         const calls = toolCalls ?? [];
         const score = scoreTurn(calls);
 
+        // Feature 3: classify failure types
+        for (const tc of calls) {
+            if (!tc.success && !tc.failureType) {
+                tc.failureType = classifyFailure(tc.toolName, tc.error, tc.outputPreview);
+            }
+        }
+
         if (score < 0) this.midRunFailures++;
+        if (score > 0) this.hasSuccesses = true;
+        if (score < 0) this.hasFailures = true;
+
+        // Feature 4: per-step productivity
+        const productivity = computeProductivity(calls, this.cumulativeScore);
 
         this.cumulativeScore += score;
         this.totalTokens += tokensUsed;
@@ -167,6 +230,8 @@ export class TrajectoryRecorder {
             toolCalls: calls,
             score,
             cumulativeScore: this.cumulativeScore,
+            observationContext: (observationContext ?? "").slice(0, 300),
+            productivityScore: productivity,
             metadata: metadata ?? {},
         };
 
@@ -192,6 +257,25 @@ export class TrajectoryRecorder {
         const runScore = computeRunScore(outcome, this.turns, this.midRunFailures);
         const quality = computeQuality(runScore, this.midRunFailures, this.turns.length);
 
+        // Feature 3: count format vs. logic failures
+        let formatFailures = 0;
+        let logicFailures = 0;
+        for (const t of this.turns) {
+            for (const tc of t.toolCalls) {
+                if (!tc.success) {
+                    if (tc.failureType === "format") formatFailures++;
+                    else if (tc.failureType === "logic") logicFailures++;
+                }
+            }
+        }
+
+        // Feature 4: finish reason mapping
+        const finishReasonMap: Record<string, string> = {
+            done: "success", success: "success",
+            error: "error", cancelled: "cancelled",
+            max_iterations: "max_iterations",
+        };
+
         const summary: RunSummary = {
             runId: this.runId,
             task: this.task.slice(0, 200),
@@ -207,6 +291,10 @@ export class TrajectoryRecorder {
             runScore,
             quality,
             midRunFailures: this.midRunFailures,
+            formatFailures,
+            logicFailures,
+            hasMixedOutcomes: this.hasSuccesses && this.hasFailures,
+            finishReason: finishReasonMap[outcome] ?? outcome,
             durationS: Math.round(elapsed * 100) / 100,
             tokensTotal: this.totalTokens,
             trajectoryFile: this.filePath,

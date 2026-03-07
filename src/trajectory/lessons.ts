@@ -31,10 +31,13 @@ concise, actionable lessons.
 ## Run Summary
 - Task: {task}
 - Outcome: {outcome}
+- Finish reason: {finishReason}
 - Run score: {runScore}/3  (3=clean, 2=efficient, 1=messy success, 0=ambiguous, -1=failed)
 - Quality: {quality}
 - Total turns: {totalTurns}
 - Mid-run failures: {midRunFailures}
+- Format errors: {formatFailures} (bad JSON, wrong params, unknown tools)
+- Logic errors: {logicFailures} (valid calls, wrong approach)
 - Duration: {durationS}s
 
 ## Key Turns (failures and pivots)
@@ -43,8 +46,9 @@ concise, actionable lessons.
 ## Instructions
 Based on this trajectory:
 1. What went wrong? (specific tool failures, bad strategies, repeated mistakes)
-2. What worked? (successful approaches, efficient patterns)
-3. What should the agent do differently next time?
+2. Were failures FORMAT errors (fixable by correcting syntax) or LOGIC errors (need new strategy)?
+3. What worked? (successful approaches, efficient patterns)
+4. What should the agent do differently next time?
 
 Respond with a markdown list of 2-5 concise lessons. Each lesson should be a \
 single line starting with "- ". Focus on ACTIONABLE advice, not vague platitudes.
@@ -75,11 +79,14 @@ function extractKeyTurns(turns: TurnRecord[], maxTurns = 10): string {
         const callsInfo: string[] = [];
         for (const tc of t.toolCalls) {
             const status = tc.success ? "OK" : "FAIL";
+            const ftTag = tc.failureType && !tc.success ? ` [${tc.failureType}]` : "";
             const preview = (tc.outputPreview || "").slice(0, 80);
-            callsInfo.push(`  - [${status}] ${tc.toolName}: ${preview}`);
+            callsInfo.push(`  - [${status}${ftTag}] ${tc.toolName}: ${preview}`);
         }
         const resp = (t.responseText || "").slice(0, 200);
-        lines.push(`### Turn ${t.turnIndex} (score=${t.score})`);
+        const obs = (t.observationContext || "").slice(0, 150);
+        lines.push(`### Turn ${t.turnIndex} (score=${t.score}, productivity=${t.productivityScore})`);
+        if (obs) lines.push(`Context: ${obs}`);
         if (resp) lines.push(`Response: ${resp}`);
         if (callsInfo.length) lines.push(callsInfo.join("\n"));
     }
@@ -95,10 +102,13 @@ export async function extractLessons(
     const prompt = SELF_ANALYSIS_PROMPT
         .replace("{task}", summary.task)
         .replace("{outcome}", summary.outcome)
+        .replace("{finishReason}", summary.finishReason ?? "unknown")
         .replace("{runScore}", String(summary.runScore))
         .replace("{quality}", summary.quality)
         .replace("{totalTurns}", String(summary.totalTurns))
         .replace("{midRunFailures}", String(summary.midRunFailures))
+        .replace("{formatFailures}", String(summary.formatFailures ?? 0))
+        .replace("{logicFailures}", String(summary.logicFailures ?? 0))
         .replace("{durationS}", String(summary.durationS))
         .replace("{keyTurns}", keyTurns);
 
@@ -114,11 +124,27 @@ export async function extractLessons(
     }
 }
 
-export function saveLessons(newLessons: string, task: string, outcome: string): void {
+// ─── Feature 1: Quality Gate ─────────────────────────────────────────────────
+
+export function shouldExtractLessons(summary: RunSummary): boolean {
+    const { quality, runScore, hasMixedOutcomes, midRunFailures, totalTurns } = summary;
+
+    if (runScore <= -1 && totalTurns >= 3) return true;
+    if (hasMixedOutcomes) return true;
+    if (runScore >= 3 && midRunFailures === 0) return false;
+    if (quality === "noisy") return true;
+    if (runScore === 2 && midRunFailures > 0) return true;
+    return false;
+}
+
+export function saveLessons(newLessons: string, task: string, outcome: string, model = ""): void {
     try {
         mkdirSync(CLAWAGENTS_DIR, { recursive: true });
 
-        const header = `\n## Lessons from run (${outcome}) — ${task.slice(0, 80)}\n`;
+        // Feature 2: tag with timestamp and model for staleness decay
+        const ts = Math.floor(Date.now() / 1000);
+        const modelTag = model ? ` [${model}]` : "";
+        const header = `\n## Lessons from run (${outcome}) — ${task.slice(0, 80)}${modelTag} @${ts}\n`;
         const entry = header + newLessons.trim() + "\n";
 
         let existing = "";
@@ -142,11 +168,28 @@ export function saveLessons(newLessons: string, task: string, outcome: string): 
     } catch { /* best effort */ }
 }
 
-export function loadLessons(maxChars = MAX_LESSONS_CHARS): string {
+export function loadLessons(maxChars = MAX_LESSONS_CHARS, maxAgeS = 0): string {
     try {
         if (!existsSync(LESSONS_FILE)) return "";
         let text = readFileSync(LESSONS_FILE, "utf-8").trim();
         if (!text) return "";
+
+        // Feature 2: filter by age if requested
+        if (maxAgeS > 0) {
+            const now = Math.floor(Date.now() / 1000);
+            const cutoff = now - maxAgeS;
+            const blocks = text.split(/(?=\n## Lessons from run)/);
+            const fresh = blocks.filter((block) => {
+                const tsMatch = block.match(/@(\d{10,})/);
+                if (tsMatch) {
+                    return parseInt(tsMatch[1]!, 10) >= cutoff;
+                }
+                return true;
+            });
+            text = fresh.join("\n").trim();
+            if (!text) return "";
+        }
+
         if (text.length > maxChars) {
             text = text.slice(-maxChars);
             const nl = text.indexOf("\n");
@@ -169,13 +212,41 @@ export function buildLessonPreamble(): string {
     );
 }
 
-export function buildRethinkWithLessons(genericRethink: string): string {
+export function buildRethinkWithLessons(
+    genericRethink: string,
+    formatFailureCount = 0,
+    logicFailureCount = 0,
+): string {
+    const parts = [genericRethink];
+
+    // Feature 3: format-specific guidance
+    if (formatFailureCount > 0 && formatFailureCount >= logicFailureCount) {
+        parts.push(
+            "\n\n## Format Error Guidance\n" +
+            "Your recent tool call failures are FORMAT errors (bad JSON, wrong parameter " +
+            "names, unknown tools). Before retrying:\n" +
+            "- Check that tool names match exactly (case-sensitive)\n" +
+            "- Ensure all required parameters are provided\n" +
+            "- Verify JSON syntax is valid (matching braces, quoted strings)\n" +
+            "- Review the tool descriptions above for correct parameter names"
+        );
+    } else if (logicFailureCount > 0) {
+        parts.push(
+            "\n\n## Strategy Guidance\n" +
+            "Your recent failures are LOGIC errors (correct tool calls, wrong approach). " +
+            "The tools work but your strategy needs adjustment. " +
+            "Try a fundamentally different approach."
+        );
+    }
+
     const lessons = loadLessons(1500);
-    if (!lessons) return genericRethink;
-    return (
-        genericRethink + "\n\n" +
-        "## Relevant Lessons from Past Runs\n" +
-        "Consider these lessons from previous runs:\n\n" +
-        lessons + "\n"
-    );
+    if (lessons) {
+        parts.push(
+            "\n\n## Relevant Lessons from Past Runs\n" +
+            "Consider these lessons from previous runs:\n\n" +
+            lessons
+        );
+    }
+
+    return parts.join("\n");
 }
