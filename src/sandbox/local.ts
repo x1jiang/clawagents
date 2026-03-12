@@ -20,6 +20,7 @@ import {
     basename,
     join,
     sep,
+    delimiter as pathDelimiter,
 } from "node:path";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
@@ -127,12 +128,17 @@ export class LocalBackend implements SandboxBackend {
         command: string,
         opts?: { timeout?: number; cwd?: string; env?: Record<string, string> },
     ): Promise<ExecResult> {
+        const cwd = opts?.cwd ?? this.cwd;
+        const nodeBin = join(cwd, "node_modules", ".bin");
+        const pathEnv = process.env.PATH ?? "";
+        const newPath = nodeBin + (pathEnv ? pathDelimiter + pathEnv : "");
+        const env = { ...process.env, ...opts?.env, PAGER: "cat", PATH: newPath };
         try {
             const { stdout, stderr } = await execAsync(command, {
                 timeout: opts?.timeout ?? 30_000,
                 maxBuffer: 1024 * 1024,
-                cwd: opts?.cwd ?? this.cwd,
-                env: { ...process.env, ...opts?.env, PAGER: "cat" },
+                cwd,
+                env,
             });
             return { stdout: stdout || "", stderr: stderr || "", exitCode: 0 };
         } catch (err: unknown) {

@@ -1,6 +1,22 @@
 import OpenAI from "openai";
-import { GoogleGenAI } from "@google/genai";
 import type { EngineConfig } from "../config/config.js";
+
+// Gemini is optional — lazy import
+let _GoogleGenAI: typeof import("@google/genai").GoogleGenAI | null = null;
+let _geminiImportAttempted = false;
+
+async function getGoogleGenAI() {
+    if (!_geminiImportAttempted) {
+        _geminiImportAttempted = true;
+        try {
+            const mod = await import("@google/genai");
+            _GoogleGenAI = mod.GoogleGenAI;
+        } catch {
+            // @google/genai not installed
+        }
+    }
+    return _GoogleGenAI;
+}
 
 // ─── Public Types ─────────────────────────────────────────────────────────
 
@@ -10,6 +26,7 @@ export interface LLMMessage {
     toolCallId?: string;          // For role="tool": the ID this result belongs to
     toolCallsMeta?: Array<{ id: string; name: string; args: Record<string, unknown> }>;  // For role="assistant": tool calls metadata
     geminiParts?: Array<Record<string, unknown>>;  // Preserved Gemini response parts (thought/thought_signature)
+    thinking?: string | null;     // Feature H: preserved <think> block content
 }
 
 export interface NativeToolSchema {
@@ -42,6 +59,26 @@ export interface StreamOptions {
 export interface LLMProvider {
     name: string;
     chat(messages: LLMMessage[], options?: StreamOptions): Promise<LLMResponse>;
+}
+
+// ─── Feature H: Thinking Token Preservation ───────────────────────────────
+
+const THINK_BLOCK_RE = /<think>([\s\S]*?)<\/think>/g;
+
+/**
+ * Extract <think>...</think> blocks and return [cleanContent, thinking].
+ * Handles models like Qwen3, DeepSeek that wrap chain-of-thought in <think> tags.
+ */
+export function stripThinkingTokens(content: string): [string, string | null] {
+    if (!content || !content.includes("<think>")) return [content, null];
+    const parts: string[] = [];
+    let match: RegExpExecArray | null;
+    const re = new RegExp(THINK_BLOCK_RE.source, THINK_BLOCK_RE.flags);
+    while ((match = re.exec(content)) !== null) {
+        parts.push(match[1]!.trim());
+    }
+    const clean = content.replace(THINK_BLOCK_RE, "").trim();
+    return [clean, parts.length ? parts.join("\n") : null];
 }
 
 // ─── Streaming Robustness Internals ───────────────────────────────────────
@@ -229,7 +266,7 @@ function repairJson(text: string): Record<string, unknown> {
         }
     }
 
-    console.error("[llm] JSON repair failed for tool call arguments — using empty args");
+    console.error(`[llm] JSON repair failed for tool call arguments (input: ${trimmed.slice(0, 200)}) — using empty args`);
     return {};
 }
 
@@ -261,24 +298,30 @@ function parseOpenAIToolCalls(
 // (client.responses.create) which has a different tool-calling interface.
 // Those would need a separate ResponsesAPIProvider.
 
+// o-series reasoning models require temperature=1 (API restriction).
+// GPT-5 models accept any temperature — do NOT include them here.
 const FIXED_TEMPERATURE_MODELS: Record<string, number> = {
-    "gpt-5-nano": 1.0,
-    "gpt-5-mini": 1.0,
-    "gpt-5": 1.0,
-    "gpt-5.1": 1.0,
-    "gpt-5.2": 1.0,
     "o1": 1.0,
     "o1-mini": 1.0,
     "o1-preview": 1.0,
     "o3": 1.0,
     "o3-mini": 1.0,
     "o4-mini": 1.0,
+    "gpt-5-nano": 1.0,
+    "gpt-5-mini": 1.0,
+    "gpt-5-turbo": 1.0,
 };
 
+const NON_REASONING_MODELS = new Set([
+    "gpt-5-micro", "gpt-4o", "gpt-4o-mini",
+]);
+
 function resolveTemperature(model: string, requested: number): number {
+    if (NON_REASONING_MODELS.has(model)) return requested;
     for (const [prefix, fixed] of Object.entries(FIXED_TEMPERATURE_MODELS)) {
         if (model === prefix || model.startsWith(prefix + "-")) return fixed;
     }
+    if (model === "gpt-5" || model.startsWith("gpt-5-2") || model.startsWith("gpt-5.")) return 1.0;
     return requested;
 }
 
@@ -290,7 +333,15 @@ export class OpenAIProvider implements LLMProvider {
     private temperature: number;
 
     constructor(config: EngineConfig) {
-        this.client = new OpenAI({ apiKey: config.openaiApiKey });
+        const apiKey = config.openaiApiKey || (config.openaiBaseUrl ? "not-needed" : "");
+        const clientOpts: Record<string, unknown> = { apiKey };
+        if (config.openaiBaseUrl) {
+            clientOpts.baseURL = config.openaiBaseUrl;
+        }
+        if (config.openaiApiVersion) {
+            clientOpts.defaultHeaders = { "api-version": config.openaiApiVersion };
+        }
+        this.client = new OpenAI(clientOpts as ConstructorParameters<typeof OpenAI>[0]);
         this.model = config.openaiModel;
         this.maxTokens = config.maxTokens;
         this.temperature = resolveTemperature(config.openaiModel, config.temperature);
@@ -456,13 +507,16 @@ function serializeGeminiParts(parts: any[] | undefined): Array<Record<string, un
 
 export class GeminiProvider implements LLMProvider {
     name = "gemini";
-    private client: GoogleGenAI;
+    private client: any;
     private model: string;
     private maxTokens: number;
     private temperature: number;
 
-    constructor(config: EngineConfig) {
-        this.client = new GoogleGenAI({ apiKey: config.geminiApiKey });
+    constructor(config: EngineConfig, genaiClass?: any) {
+        if (!genaiClass) {
+            throw new Error("google-genai not installed. Install with: npm install @google/genai");
+        }
+        this.client = new genaiClass({ apiKey: config.geminiApiKey });
         this.model = config.geminiModel;
         this.maxTokens = config.maxTokens;
         this.temperature = config.temperature;
@@ -555,6 +609,7 @@ export class GeminiProvider implements LLMProvider {
                 const resp = await this.client.models.generateContent(gOptions);
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 const parts = resp.candidates?.[0]?.content?.parts as any[] | undefined;
+                const finishReason = resp.candidates?.[0]?.finishReason as string | undefined;
                 const rawParts = serializeGeminiParts(parts);
                 const fnCalls = parts
                     ?.filter((p) => p?.functionCall)
@@ -567,6 +622,32 @@ export class GeminiProvider implements LLMProvider {
                     ?.filter((p) => typeof p?.text === "string" && !p?.thought)
                     .map((p) => p.text)
                     .join("") ?? "";
+
+                if (finishReason && String(finishReason).includes("MALFORMED_FUNCTION_CALL") && !fnCalls?.length) {
+                    console.error("  [gemini] MALFORMED_FUNCTION_CALL detected — retrying with mode=ANY");
+                    const retryConfig = { ...configObj, toolConfig: { functionCallingConfig: { mode: "ANY" } } };
+                    const retryResp = await this.client.models.generateContent({ ...gOptions, config: retryConfig });
+                    const retryParts = retryResp.candidates?.[0]?.content?.parts as any[] | undefined;
+                    const retryRawParts = serializeGeminiParts(retryParts);
+                    const retryFnCalls = retryParts
+                        ?.filter((p: any) => p?.functionCall)
+                        .map((p: any) => ({
+                            toolName: p.functionCall.name as string,
+                            args: (p.functionCall.args ?? {}) as Record<string, unknown>,
+                            toolCallId: `gemini_${Math.random().toString(36).substring(2, 10)}`,
+                        }));
+                    const retryText = retryParts
+                        ?.filter((p: any) => typeof p?.text === "string" && !p?.thought)
+                        .map((p: any) => p.text)
+                        .join("") ?? "";
+                    return {
+                        content: retryText,
+                        model: this.model,
+                        tokensUsed: retryResp.usageMetadata?.candidatesTokenCount || 0,
+                        ...(retryFnCalls?.length ? { toolCalls: retryFnCalls } : {}),
+                        ...(retryRawParts ? { geminiParts: retryRawParts } : {}),
+                    };
+                }
 
                 return {
                     content: extractedText,
@@ -582,7 +663,7 @@ export class GeminiProvider implements LLMProvider {
     }
 
     private async streamWithRetry(
-        gOptions: Parameters<GoogleGenAI["models"]["generateContentStream"]>[0],
+        gOptions: any,
         options: StreamOptions,
     ): Promise<LLMResponse> {
         let lastError: unknown;
@@ -598,6 +679,7 @@ export class GeminiProvider implements LLMProvider {
             let finalTokens = 0;
             const fnCalls: NativeToolCall[] = [];
             const allStreamParts: any[] = [];
+            let lastFinishReason: string | undefined;
 
             try {
                 const stream = await this.client.models.generateContentStream(gOptions);
@@ -616,6 +698,9 @@ export class GeminiProvider implements LLMProvider {
                         const candidates = (chunk as any).candidates;
                         if (candidates) {
                             for (const candidate of candidates) {
+                                if (candidate?.finishReason) {
+                                    lastFinishReason = String(candidate.finishReason);
+                                }
                                 const parts = candidate?.content?.parts;
                                 if (parts) {
                                     for (const p of parts) {
@@ -639,6 +724,32 @@ export class GeminiProvider implements LLMProvider {
                     }
                 }
 
+                if (lastFinishReason && lastFinishReason.includes("MALFORMED_FUNCTION_CALL") && fnCalls.length === 0) {
+                    console.error("  [gemini] MALFORMED_FUNCTION_CALL in stream — retrying with mode=ANY (non-stream)");
+                    const retryConfig = { ...gOptions.config, toolConfig: { functionCallingConfig: { mode: "ANY" } } };
+                    const retryResp = await this.client.models.generateContent({ ...gOptions, config: retryConfig });
+                    const retryParts = retryResp.candidates?.[0]?.content?.parts as any[] | undefined;
+                    const retryRawParts = serializeGeminiParts(retryParts);
+                    const retryFnCalls = retryParts
+                        ?.filter((p: any) => p?.functionCall)
+                        .map((p: any) => ({
+                            toolName: p.functionCall.name as string,
+                            args: (p.functionCall.args ?? {}) as Record<string, unknown>,
+                            toolCallId: `gemini_${Math.random().toString(36).substring(2, 10)}`,
+                        }));
+                    const retryText = retryParts
+                        ?.filter((p: any) => typeof p?.text === "string" && !p?.thought)
+                        .map((p: any) => p.text)
+                        .join("") ?? "";
+                    return {
+                        content: retryText,
+                        model: this.model,
+                        tokensUsed: retryResp.usageMetadata?.candidatesTokenCount || 0,
+                        ...(retryFnCalls?.length ? { toolCalls: retryFnCalls } : {}),
+                        ...(retryRawParts ? { geminiParts: retryRawParts } : {}),
+                    };
+                }
+
                 const rawParts = serializeGeminiParts(allStreamParts);
                 return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
             } catch (err) {
@@ -660,16 +771,138 @@ export class GeminiProvider implements LLMProvider {
     }
 }
 
+// ─── Anthropic Provider ───────────────────────────────────────────────────
+
+let _AnthropicClass: any = null;
+let _anthropicImportAttempted = false;
+
+async function getAnthropicClass() {
+    if (!_anthropicImportAttempted) {
+        _anthropicImportAttempted = true;
+        try {
+            // @ts-ignore — optional peer dependency
+            const mod = await import("@anthropic-ai/sdk");
+            _AnthropicClass = mod.default ?? mod.Anthropic ?? mod;
+        } catch {
+            // @anthropic-ai/sdk not installed
+        }
+    }
+    return _AnthropicClass;
+}
+
+export class AnthropicProvider implements LLMProvider {
+    name = "anthropic";
+    private client: any;
+    private model: string;
+    private maxTokens: number;
+    private temperature: number;
+
+    constructor(config: EngineConfig, anthropicClass: any) {
+        if (!anthropicClass) {
+            throw new Error("@anthropic-ai/sdk not installed. Install with: npm install @anthropic-ai/sdk");
+        }
+        this.client = new anthropicClass({ apiKey: config.anthropicApiKey });
+        this.model = config.anthropicModel;
+        this.maxTokens = config.maxTokens;
+        this.temperature = config.temperature;
+    }
+
+    async chat(messages: LLMMessage[], options?: StreamOptions): Promise<LLMResponse> {
+        const systemParts: string[] = [];
+        const apiMessages: Array<Record<string, unknown>> = [];
+
+        for (const m of messages) {
+            if (m.role === "system") {
+                systemParts.push(typeof m.content === "string" ? m.content : String(m.content));
+            } else if (m.role === "tool" && m.toolCallId) {
+                apiMessages.push({
+                    role: "user",
+                    content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: m.content }],
+                });
+            } else if (m.role === "assistant" && m.toolCallsMeta) {
+                const blocks: Array<Record<string, unknown>> = [];
+                if (m.content) blocks.push({ type: "text", text: m.content });
+                for (const tc of m.toolCallsMeta) {
+                    blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args });
+                }
+                apiMessages.push({ role: "assistant", content: blocks });
+            } else {
+                apiMessages.push({
+                    role: m.role === "assistant" ? "assistant" : "user",
+                    content: m.content,
+                });
+            }
+        }
+
+        const kwargs: Record<string, unknown> = {
+            model: this.model,
+            max_tokens: this.maxTokens,
+            messages: apiMessages,
+        };
+        if (systemParts.length) kwargs.system = systemParts.join("\n");
+        if (this.temperature > 0) kwargs.temperature = this.temperature;
+        if (options?.tools?.length) {
+            kwargs.tools = options.tools.map((s) => ({
+                name: s.name,
+                description: s.description,
+                input_schema: {
+                    type: "object",
+                    properties: Object.fromEntries(
+                        Object.entries(s.parameters).map(([k, v]) => [k, { type: v.type, description: v.description }]),
+                    ),
+                    required: Object.entries(s.parameters).filter(([_, v]) => v.required).map(([k]) => k),
+                },
+            }));
+        }
+
+        return withRetry("anthropic", async () => {
+            const resp = await this.client.messages.create(kwargs);
+            const textParts: string[] = [];
+            const toolCalls: NativeToolCall[] = [];
+            for (const block of resp.content) {
+                if (block.type === "text") textParts.push(block.text);
+                else if (block.type === "tool_use") {
+                    toolCalls.push({
+                        toolName: block.name,
+                        args: block.input ?? {},
+                        toolCallId: block.id,
+                    });
+                }
+            }
+            return {
+                content: textParts.join(""),
+                model: this.model,
+                tokensUsed: (resp.usage?.input_tokens ?? 0) + (resp.usage?.output_tokens ?? 0),
+                ...(toolCalls.length ? { toolCalls } : {}),
+            };
+        });
+    }
+}
+
 // ─── Factory ──────────────────────────────────────────────────────────────
 
 /**
  * Create a single LLM provider. The provider is inferred from the model name:
- * names starting with "gemini" → GeminiProvider, everything else → OpenAIProvider.
+ * names starting with "gemini" → GeminiProvider, "claude"/"anthropic" → AnthropicProvider,
+ * everything else → OpenAIProvider.
  */
-export function createProvider(modelName: string, config: EngineConfig): LLMProvider {
-    if (modelName.toLowerCase().startsWith("gemini")) {
+export async function createProvider(modelName: string, config: EngineConfig): Promise<LLMProvider> {
+    const lower = modelName.toLowerCase();
+    if (lower.startsWith("gemini")) {
+        const GenAI = await getGoogleGenAI();
+        if (!GenAI) {
+            throw new Error("@google/genai not installed. Install with: npm install @google/genai");
+        }
         config.geminiModel = modelName;
-        return new GeminiProvider(config);
+        return new GeminiProvider(config, GenAI);
+    }
+    if (lower.startsWith("claude") || lower.startsWith("anthropic")) {
+        const AnthropicClass = await getAnthropicClass();
+        if (!AnthropicClass) {
+            throw new Error("@anthropic-ai/sdk not installed. Install with: npm install @anthropic-ai/sdk");
+        }
+        config.anthropicModel = modelName;
+        return new AnthropicProvider(config, AnthropicClass);
     }
     config.openaiModel = modelName;
     return new OpenAIProvider(config);

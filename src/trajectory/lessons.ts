@@ -16,12 +16,17 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
 import type { LLMProvider, LLMMessage } from "../providers/llm.js";
 import type { RunSummary, TurnRecord } from "./recorder.js";
 
-const CLAWAGENTS_DIR = resolve(process.cwd(), ".clawagents");
-const LESSONS_FILE = resolve(CLAWAGENTS_DIR, "lessons.md");
+function getClawagentsDir(): string {
+    return resolve(process.cwd(), ".clawagents");
+}
+
+function getLessonsFile(): string {
+    return resolve(getClawagentsDir(), "lessons.md");
+}
 const MAX_LESSONS_CHARS = 4000;
 const MAX_LESSONS_LINES = 250;
 
@@ -30,10 +35,12 @@ concise, actionable lessons.
 
 ## Run Summary
 - Task: {task}
+- Task type: {taskType}
 - Outcome: {outcome}
 - Finish reason: {finishReason}
 - Run score: {runScore}/3  (3=clean, 2=efficient, 1=messy success, 0=ambiguous, -1=failed)
 - Quality: {quality}
+- Verified score: {verifiedScore} (objective, from tool outputs; confidence={verifiedConfidence}, method={verifiedMethod})
 - Total turns: {totalTurns}
 - Mid-run failures: {midRunFailures}
 - Format errors: {formatFailures} (bad JSON, wrong params, unknown tools)
@@ -49,6 +56,7 @@ Based on this trajectory:
 2. Were failures FORMAT errors (fixable by correcting syntax) or LOGIC errors (need new strategy)?
 3. What worked? (successful approaches, efficient patterns)
 4. What should the agent do differently next time?
+5. If the verified score differs from the self-assessed run score, explain why (the verified score is objective ground truth from actual tool outputs).
 
 Respond with a markdown list of 2-5 concise lessons. Each lesson should be a \
 single line starting with "- ". Focus on ACTIONABLE advice, not vague platitudes.
@@ -99,12 +107,17 @@ export async function extractLessons(
     turns: TurnRecord[],
 ): Promise<string | null> {
     const keyTurns = extractKeyTurns(turns);
+    const vScore = summary.verifiedScore;
     const prompt = SELF_ANALYSIS_PROMPT
         .replace("{task}", summary.task)
+        .replace("{taskType}", (summary as any).taskType ?? "general")
         .replace("{outcome}", summary.outcome)
         .replace("{finishReason}", summary.finishReason ?? "unknown")
         .replace("{runScore}", String(summary.runScore))
         .replace("{quality}", summary.quality)
+        .replace("{verifiedScore}", vScore != null ? vScore.toFixed(2) : "N/A")
+        .replace("{verifiedConfidence}", (summary as any).verifiedConfidence ?? "N/A")
+        .replace("{verifiedMethod}", (summary as any).verifiedMethod ?? "N/A")
         .replace("{totalTurns}", String(summary.totalTurns))
         .replace("{midRunFailures}", String(summary.midRunFailures))
         .replace("{formatFailures}", String(summary.formatFailures ?? 0))
@@ -127,7 +140,13 @@ export async function extractLessons(
 // ─── Feature 1: Quality Gate ─────────────────────────────────────────────────
 
 export function shouldExtractLessons(summary: RunSummary): boolean {
-    const { quality, runScore, hasMixedOutcomes, midRunFailures, totalTurns } = summary;
+    const { quality, runScore, hasMixedOutcomes, midRunFailures, totalTurns, verifiedScore } = summary;
+
+    // Feature A: score disagreement is high signal
+    if (verifiedScore != null) {
+        const runNormalized = runScore / 3.0;
+        if (Math.abs(runNormalized - verifiedScore) > 0.4) return true;
+    }
 
     if (runScore <= -1 && totalTurns >= 3) return true;
     if (hasMixedOutcomes) return true;
@@ -139,7 +158,7 @@ export function shouldExtractLessons(summary: RunSummary): boolean {
 
 export function saveLessons(newLessons: string, task: string, outcome: string, model = ""): void {
     try {
-        mkdirSync(CLAWAGENTS_DIR, { recursive: true });
+        mkdirSync(getClawagentsDir(), { recursive: true });
 
         // Feature 2: tag with timestamp and model for staleness decay
         const ts = Math.floor(Date.now() / 1000);
@@ -148,8 +167,8 @@ export function saveLessons(newLessons: string, task: string, outcome: string, m
         const entry = header + newLessons.trim() + "\n";
 
         let existing = "";
-        if (existsSync(LESSONS_FILE)) {
-            existing = readFileSync(LESSONS_FILE, "utf-8");
+        if (existsSync(getLessonsFile())) {
+            existing = readFileSync(getLessonsFile(), "utf-8");
         }
 
         let combined = existing + "\n" + entry;
@@ -161,17 +180,17 @@ export function saveLessons(newLessons: string, task: string, outcome: string, m
         if (text.length > MAX_LESSONS_CHARS * 3) {
             const trimmed = text.slice(-(MAX_LESSONS_CHARS * 3));
             const nl = trimmed.indexOf("\n");
-            writeFileSync(LESSONS_FILE, (nl > 0 ? trimmed.slice(nl + 1) : trimmed) + "\n", "utf-8");
+            writeFileSync(getLessonsFile(), (nl > 0 ? trimmed.slice(nl + 1) : trimmed) + "\n", "utf-8");
         } else {
-            writeFileSync(LESSONS_FILE, text + "\n", "utf-8");
+            writeFileSync(getLessonsFile(), text + "\n", "utf-8");
         }
     } catch { /* best effort */ }
 }
 
 export function loadLessons(maxChars = MAX_LESSONS_CHARS, maxAgeS = 0): string {
     try {
-        if (!existsSync(LESSONS_FILE)) return "";
-        let text = readFileSync(LESSONS_FILE, "utf-8").trim();
+        if (!existsSync(getLessonsFile())) return "";
+        let text = readFileSync(getLessonsFile(), "utf-8").trim();
         if (!text) return "";
 
         // Feature 2: filter by age if requested
@@ -249,4 +268,36 @@ export function buildRethinkWithLessons(
     }
 
     return parts.join("\n");
+}
+
+export function exportLessons(outputPath?: string): string {
+    const lessons = loadLessons(999999);
+    const path = outputPath ?? resolve(getClawagentsDir(), "lessons_export.json");
+    mkdirSync(dirname(path), { recursive: true });
+    const data = {
+        version: 1,
+        exported_at: Math.floor(Date.now() / 1000),
+        lessons_md: lessons,
+    };
+    writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
+    return path;
+}
+
+export function importLessons(inputPath: string): boolean {
+    try {
+        const data = JSON.parse(readFileSync(inputPath, "utf-8"));
+        if (data.version !== 1 || !data.lessons_md) {
+            console.error("Invalid lessons export format");
+            return false;
+        }
+        mkdirSync(getClawagentsDir(), { recursive: true });
+        const lessonsFile = getLessonsFile();
+        let existing = "";
+        try { existing = readFileSync(lessonsFile, "utf-8"); } catch { /* new file */ }
+        const combined = existing + "\n\n## Imported Lessons\n" + data.lessons_md;
+        writeFileSync(lessonsFile, combined.trim() + "\n", "utf-8");
+        return true;
+    } catch {
+        return false;
+    }
 }

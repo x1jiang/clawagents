@@ -32,14 +32,15 @@ function resolveLane(raw?: string): string {
     return VALID_LANES.has(lane) ? lane : CommandLane.Main;
 }
 
-export function startGateway(port: number = 3000) {
+export async function startGateway(port: number = 3000) {
     const config = loadConfig();
     const activeModel = getDefaultModel(config);
-    const llm = createProvider(activeModel, config);
+    const llm = await createProvider(activeModel, config);
+    const gatewayApiKey = process.env["GATEWAY_API_KEY"] ?? "";
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
         try {
-            await handleRequest(req, res, llm, activeModel);
+            await handleRequest(req, res, llm, activeModel, gatewayApiKey);
         } catch (err) {
             if (!res.headersSent) {
                 res.writeHead(500, { "Content-Type": "application/json" });
@@ -48,10 +49,12 @@ export function startGateway(port: number = 3000) {
         }
     });
 
+    const authStatus = gatewayApiKey ? "enabled" : "disabled (set GATEWAY_API_KEY to enable)";
     server.listen(port, () => {
         console.log(`\n🦞 ClawAgents Gateway running on http://localhost:${port}`);
         console.log(`   Provider: ${llm.name}`);
         console.log(`   Model: ${activeModel}`);
+        console.log(`   Auth: ${authStatus}`);
         console.log(`   Endpoints: POST /chat | POST /chat/stream | GET /queue | GET /health\n`);
     });
 
@@ -63,7 +66,33 @@ async function handleRequest(
     res: ServerResponse,
     llm: LLMProvider,
     activeModel: string,
+    gatewayApiKey = "",
 ) {
+    // CORS headers
+    const corsOrigins = process.env["GATEWAY_CORS_ORIGINS"] ?? "*";
+    res.setHeader("Access-Control-Allow-Origin", corsOrigins);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
+
+    if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+
+    // Auth check for POST endpoints
+    if (gatewayApiKey && req.method === "POST") {
+        const authHeader = req.headers.authorization ?? "";
+        const rawApiKey = req.headers["x-api-key"];
+        const apiKeyHeader = Array.isArray(rawApiKey) ? rawApiKey[0] ?? "" : rawApiKey ?? "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : apiKeyHeader;
+        if (token !== gatewayApiKey) {
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unauthorized. Set Authorization: Bearer <GATEWAY_API_KEY>" }));
+            return;
+        }
+    }
+
     // GET /health
     if (req.method === "GET" && req.url === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -167,8 +196,8 @@ async function handleRequest(
             const result = await enqueueCommandInLane(lane, async () => {
                 sse("started", { lane });
                 const agent = await createClawAgent({ model: llm });
-                return await agent.invoke(task, undefined, (event) => {
-                    sse("agent", event);
+                return await agent.invoke(task, undefined, (kind, data) => {
+                    sse("agent", { kind, ...data });
                 });
             });
             sse("done", {

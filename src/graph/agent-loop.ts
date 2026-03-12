@@ -21,9 +21,18 @@
  */
 
 import type { LLMProvider, LLMMessage, StreamOptions, LLMResponse, NativeToolSchema } from "../providers/llm.js";
+import { stripThinkingTokens } from "../providers/llm.js";
 import type { ToolRegistry, ParsedToolCall } from "../tools/registry.js";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+
+// ─── Model Control Token Sanitization ─────────────────────────────────────
+// Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)
+const MODEL_CONTROL_TOKEN_RE = /<[｜|][^>]*?[｜|]>/g;
+
+function sanitizeAssistantText(text: string): string {
+    return text.replace(MODEL_CONTROL_TOKEN_RE, "").trim();
+}
 
 // ─── Dangling Tool Call Repair (learned from deepagents) ──────────────────
 // When native function calling is used and the agent loop is interrupted mid-execution,
@@ -61,11 +70,22 @@ function patchDanglingToolCalls(messages: LLMMessage[]): LLMMessage[] {
 // bloating the context window.
 
 const EVICTION_CHARS_THRESHOLD = 80_000; // ~20K tokens at 4 chars/token
-const EVICTION_DIR = resolve(process.cwd(), ".clawagents", "large_results");
+function getEvictionDir(): string {
+    return resolve(process.cwd(), ".clawagents", "large_results");
+}
+
+const PREVIEW_MAX_CHARS = 2000;
 
 function createContentPreview(content: string, headLines = 5, tailLines = 5): string {
     const lines = content.split("\n");
-    if (lines.length <= headLines + tailLines + 2) return content;
+    if (lines.length <= headLines + tailLines + 2 && content.length <= PREVIEW_MAX_CHARS) return content;
+
+    if (lines.length <= headLines + tailLines + 2) {
+        const half = Math.floor(PREVIEW_MAX_CHARS / 2);
+        return content.slice(0, half) +
+            `\n... [${content.length - PREVIEW_MAX_CHARS} chars truncated] ...\n` +
+            content.slice(-half);
+    }
 
     const head = lines.slice(0, headLines).map((l, i) => `${i + 1}: ${l}`).join("\n");
     const tail = lines.slice(-tailLines).map((l, i) => `${lines.length - tailLines + i + 1}: ${l}`).join("\n");
@@ -77,10 +97,11 @@ function evictLargeToolResult(toolName: string, output: string): string {
     if (output.length < EVICTION_CHARS_THRESHOLD) return output;
 
     try {
-        mkdirSync(EVICTION_DIR, { recursive: true });
+        const evictionDir = getEvictionDir();
+        mkdirSync(evictionDir, { recursive: true });
         const ts = Date.now();
         const sanitized = toolName.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const filePath = resolve(EVICTION_DIR, `${sanitized}_${ts}.txt`);
+        const filePath = resolve(evictionDir, `${sanitized}_${ts}.txt`);
         writeFileSync(filePath, output, "utf-8");
 
         const preview = createContentPreview(output);
@@ -89,8 +110,11 @@ function evictLargeToolResult(toolName: string, output: string): string {
             `Use read_file to access the full result. Preview:\n\n${preview}`
         );
     } catch {
-        // If eviction fails, fall back to simple truncation
-        return output.slice(0, EVICTION_CHARS_THRESHOLD) + "\n...(output truncated)";
+        // If eviction fails, fall back to head+tail truncation
+        const half = Math.floor(EVICTION_CHARS_THRESHOLD / 2);
+        return output.slice(0, half) +
+            `\n\n... [truncated ${output.length - EVICTION_CHARS_THRESHOLD} chars] ...\n\n` +
+            output.slice(-half);
     }
 }
 
@@ -290,17 +314,60 @@ export function stableStringify(obj: unknown): string {
 
 export class ToolCallTracker {
     private history: string[] = [];
+    private resultHashes = new Map<string, string>();
+    private noProgressCount = 0;
     private softWarnings = 0;
 
     constructor(
         private windowSize = 30,
         private softLimit = 3,
         private hardLimit = 6,
+        private circuitBreakerLimit = 30,
     ) { }
+
+    private hashResult(output: string): string {
+        const sample = output.slice(0, 500);
+        let hash = 0;
+        for (let i = 0; i < sample.length; i++) {
+            hash = ((hash << 5) - hash + sample.charCodeAt(i)) | 0;
+        }
+        return String(hash);
+    }
 
     record(toolName: string, args: Record<string, unknown>): void {
         this.history.push(`${toolName}:${stableStringify(args)}`);
         if (this.history.length > this.windowSize) this.history.shift();
+    }
+
+    /** Record the result of a tool call for no-progress detection. */
+    recordResult(toolName: string, args: Record<string, unknown>, output: string): void {
+        const key = `${toolName}:${stableStringify(args)}`;
+        const resultHash = this.hashResult(output);
+        const prevHash = this.resultHashes.get(key);
+        if (prevHash === resultHash) {
+            this.noProgressCount++;
+        } else {
+            this.noProgressCount = Math.max(0, this.noProgressCount - 1);
+        }
+        this.resultHashes.set(key, resultHash);
+    }
+
+    /** Detect A→B→A→B ping-pong oscillation (last 6 entries). */
+    isPingPonging(): boolean {
+        if (this.history.length < 4) return false;
+        const recent = this.history.slice(-6);
+        if (recent.length < 4) return false;
+        const unique = new Set(recent);
+        if (unique.size !== 2) return false;
+        for (let i = 0; i < recent.length - 1; i++) {
+            if (recent[i] === recent[i + 1]) return false;
+        }
+        return true;
+    }
+
+    /** Global circuit breaker: too many no-progress calls. */
+    isCircuitBroken(): boolean {
+        return this.noProgressCount >= this.circuitBreakerLimit;
     }
 
     private countOccurrences(toolName: string, args: Record<string, unknown>): number {
@@ -360,11 +427,14 @@ const SCORELESS_TOOLS = new Set([
 class FailureTracker {
     private results: boolean[] = [];  // true = success, false = failure
     private rethinkCount = 0;
+    public threshold: number;   // Feature F: mutable for adaptive threshold
 
     constructor(
-        private threshold = RETHINK_THRESHOLD,
+        threshold = RETHINK_THRESHOLD,
         private maxRethinks = MAX_RETHINKS,
-    ) {}
+    ) {
+        this.threshold = threshold;
+    }
 
     record(success: boolean, toolName = ""): void {
         if (SCORELESS_TOOLS.has(toolName)) return;
@@ -491,10 +561,167 @@ function preflightContextCheck(
 }
 
 
+// ─── Soft-Trim: prune stale/low-value content before compaction ───────────
+
+const SOFT_TRIM_RATIO = 0.60;
+const SOFT_TRIM_RESULT_MAX_CHARS = 1000;
+const SOFT_TRIM_RESULT_KEEP_CHARS = 500;
+const SOFT_TRIM_RECENT_PROTECTED = 10;
+
+function softTrimMessages(
+    messages: LLMMessage[],
+    contextWindow: number,
+    tokenMultiplier: number,
+    emit: OnEvent,
+    modelName?: string,
+): LLMMessage[] {
+    const { window: effectiveWindow } = modelName
+        ? resolveContextBudget(modelName, contextWindow)
+        : { window: contextWindow };
+    const softBudget = Math.floor(effectiveWindow * SOFT_TRIM_RATIO);
+    const currentTokens = estimateMessagesTokens(messages, tokenMultiplier);
+
+    if (currentTokens <= softBudget) return messages;
+
+    const protectFrom = Math.max(0, messages.length - SOFT_TRIM_RECENT_PROTECTED * 2);
+    let trimCount = 0;
+    const seen = new Map<string, number>(); // tool-call key → latest index
+    const result: LLMMessage[] = [];
+
+    // First pass: identify duplicate tool results and mark latest index
+    for (let i = 0; i < messages.length; i++) {
+        const m = messages[i]!;
+        if (m.role === "tool" || (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[Tool Result]"))) {
+            // Look at the preceding assistant message for tool identity
+            if (i > 0) {
+                const prev = messages[i - 1]!;
+                if (prev.role === "assistant" && typeof prev.content === "string") {
+                    const key = prev.content.slice(0, 200) + "|" + (typeof m.content === "string" ? m.content.slice(0, 200) : "");
+                    seen.set(key, i);
+                }
+            }
+        }
+    }
+
+    // Second pass: trim/prune
+    for (let i = 0; i < messages.length; i++) {
+        const m = messages[i]!;
+
+        if (i >= protectFrom) {
+            result.push(m);
+            continue;
+        }
+
+        // Prune image-only tool results from early turns
+        if ((m.role === "tool" || (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[Tool Result]"))) &&
+            typeof m.content === "string") {
+            const trimmedContent = m.content.replace(/^\[Tool Result\]\s*/, "").trim();
+            if (/^\[image data\]$/i.test(trimmedContent) || /^\[image\]$/i.test(trimmedContent)) {
+                result.push({ ...m, content: "[Tool Result] [image data removed — stale]" });
+                trimCount++;
+                continue;
+            }
+        }
+
+        // Remove duplicate tool results (keep only the most recent)
+        if (m.role === "tool" || (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[Tool Result]"))) {
+            if (i > 0) {
+                const prev = messages[i - 1]!;
+                if (prev.role === "assistant" && typeof prev.content === "string") {
+                    const key = prev.content.slice(0, 200) + "|" + (typeof m.content === "string" ? m.content.slice(0, 200) : "");
+                    const latestIdx = seen.get(key);
+                    if (latestIdx !== undefined && latestIdx !== i) {
+                        result.push({ ...m, content: "[Tool Result] [duplicate — see later result]" });
+                        trimCount++;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Trim large old tool results
+        if ((m.role === "tool" || (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[Tool Result]")))) {
+            const content = typeof m.content === "string" ? m.content : String(m.content);
+            if (content.length > SOFT_TRIM_RESULT_MAX_CHARS) {
+                const half = Math.floor(SOFT_TRIM_RESULT_KEEP_CHARS / 2);
+                const trimmed = content.slice(0, half) +
+                    `\n...[soft-trimmed ${content.length - SOFT_TRIM_RESULT_KEEP_CHARS} chars]...\n` +
+                    content.slice(-half);
+                result.push({ ...m, content: trimmed });
+                trimCount++;
+                continue;
+            }
+        }
+
+        result.push(m);
+    }
+
+    if (trimCount > 0) {
+        emit("context", { message: `soft-trim: trimmed ${trimCount} old tool results` });
+    }
+    return result;
+}
+
+
 // ─── Context Window Guard with Auto-Compaction ────────────────────────────
 
 const CONTEXT_BUDGET_RATIO = 0.75; // fallback; overridden by model-aware budget
-const RECENT_MESSAGES_TO_KEEP = 6;
+const RECENT_MESSAGES_TO_KEEP = 20;
+const COMPACTION_CHUNK_TOKENS = 30_000;
+const COMPACTION_MAX_RETRIES = 3;
+
+const IDENTIFIER_PRESERVATION = `
+CRITICAL: Preserve these verbatim (do not paraphrase or omit):
+- File paths (e.g., src/utils/auth.ts)
+- Function/variable/class names (e.g., handleAuth, userToken)
+- Error messages and stack traces
+- Command-line commands that were run
+- Configuration values and URLs`;
+
+function findSafeSplitIndex(nonSystem: LLMMessage[], desiredRecent: number): number {
+    let split = Math.max(0, nonSystem.length - desiredRecent);
+    while (split < nonSystem.length - 1) {
+        const msg = nonSystem[split]!;
+        if (msg.role === "tool" && msg.toolCallId) {
+            split++;
+            continue;
+        }
+        break;
+    }
+    return split;
+}
+
+async function summarizeChunk(
+    llm: LLMProvider,
+    chunkText: string,
+    taskContext: string,
+): Promise<string> {
+    const prompt =
+        "You are summarizing a chunk of an AI agent's conversation history.\n\n" +
+        `## Original Task\n${taskContext}\n\n` +
+        `## Conversation Chunk\n${chunkText}\n\n` +
+        "## Instructions\n" +
+        "Write a structured summary preserving:\n" +
+        "- What tools were called and their key results (file paths, data, errors)\n" +
+        "- What has been accomplished\n" +
+        "- Any critical facts, variable values, or decisions made\n" +
+        IDENTIFIER_PRESERVATION + "\n" +
+        "Be concise but preserve all actionable information.";
+
+    let lastError: unknown;
+    for (let attempt = 0; attempt < COMPACTION_MAX_RETRIES; attempt++) {
+        try {
+            const resp = await llm.chat([{ role: "user", content: prompt }]);
+            if (resp.content.trim()) return resp.content.trim();
+        } catch (e) {
+            lastError = e;
+        }
+        if (attempt < COMPACTION_MAX_RETRIES - 1) {
+            await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+        }
+    }
+    throw lastError ?? new Error("Summarization returned empty");
+}
 
 async function compactIfNeeded(
     messages: LLMMessage[],
@@ -504,7 +731,6 @@ async function compactIfNeeded(
     tokenMultiplier: number,
     modelName?: string,
 ): Promise<LLMMessage[]> {
-    // Phase 1: truncate tool args in older messages (cheap, no LLM call)
     messages = truncateOldToolArgs(messages, RECENT_PROTECTED_COUNT);
 
     const { window: effectiveWindow, ratio } = modelName
@@ -517,7 +743,6 @@ async function compactIfNeeded(
 
     emit("context", { message: `~${currentTokens} tokens exceeds budget ${budget} — compacting` });
 
-    // Single-pass split
     const systemMessages: LLMMessage[] = [];
     const nonSystem: LLMMessage[] = [];
     for (const m of messages) {
@@ -526,34 +751,83 @@ async function compactIfNeeded(
 
     if (nonSystem.length <= RECENT_MESSAGES_TO_KEEP) return messages;
 
-    const recentCount = Math.min(RECENT_MESSAGES_TO_KEEP, nonSystem.length);
-    const older = nonSystem.slice(0, -recentCount);
-    const recent = nonSystem.slice(-recentCount);
+    const splitIdx = findSafeSplitIndex(nonSystem, RECENT_MESSAGES_TO_KEEP);
+    if (splitIdx <= 0) return messages;
 
-    const parts: string[] = [];
-    for (const m of older) parts.push(`[${m.role.toUpperCase()}]: ${m.content}`);
-    const textLog = parts.join("\n\n");
+    const older = nonSystem.slice(0, splitIdx);
+    const recent = nonSystem.slice(splitIdx);
 
-    const summaryPrompt =
-        "Compress the following agent conversation history into a concise summary. " +
-        "Keep key facts, file paths, errors, and tool results. Be brief.\n\n" +
-        textLog;
-
-    // Phase 8: Offload full history before summarizing
     const offloadPath = offloadHistory(older);
     if (offloadPath) {
         emit("context", { message: `offloaded ${older.length} messages to ${offloadPath}` });
     }
 
+    let taskContext = "";
+    for (const m of nonSystem) {
+        if (m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[Tool Result]")) {
+            taskContext = m.content.slice(0, 500);
+            break;
+        }
+    }
+
+    const textParts: string[] = [];
+    for (const m of older) {
+        const content = typeof m.content === "string" ? m.content : String(m.content);
+        if (m.role === "assistant" && m.toolCallsMeta) {
+            const calls = m.toolCallsMeta.map((tc) => tc.name).join(", ");
+            textParts.push(`[TOOL CALLS: ${calls}] ${content.slice(0, 200)}`);
+        } else if (m.role === "tool") {
+            textParts.push(`[TOOL RESULT]: ${content.slice(0, 200)}`);
+        } else {
+            textParts.push(`[${m.role.toUpperCase()}]: ${content.slice(0, 500)}`);
+        }
+    }
+
+    const totalTokens = estimateTokens(textParts.join("\n\n"), tokenMultiplier);
+
     try {
-        const resp = await llm.chat([{ role: "user", content: summaryPrompt }]);
-        if (!resp.content.trim()) {
+        let summaryText: string;
+
+        if (totalTokens <= COMPACTION_CHUNK_TOKENS) {
+            const textLog = textParts.join("\n\n");
+            summaryText = await summarizeChunk(llm, textLog, taskContext);
+        } else {
+            const chunks: string[] = [];
+            let currentChunk: string[] = [];
+            let currentChunkTokens = 0;
+
+            for (const part of textParts) {
+                const partTokens = estimateTokens(part, tokenMultiplier);
+                if (currentChunkTokens + partTokens > COMPACTION_CHUNK_TOKENS && currentChunk.length > 0) {
+                    chunks.push(currentChunk.join("\n\n"));
+                    currentChunk = [];
+                    currentChunkTokens = 0;
+                }
+                currentChunk.push(part);
+                currentChunkTokens += partTokens;
+            }
+            if (currentChunk.length > 0) {
+                chunks.push(currentChunk.join("\n\n"));
+            }
+
+            emit("context", { message: `splitting ${textParts.length} parts into ${chunks.length} chunks for summarization` });
+
+            const chunkSummaries: string[] = [];
+            for (let i = 0; i < chunks.length; i++) {
+                const chunkSummary = await summarizeChunk(llm, chunks[i]!, taskContext);
+                chunkSummaries.push(`### Chunk ${i + 1}/${chunks.length}\n${chunkSummary}`);
+            }
+            summaryText = chunkSummaries.join("\n\n");
+        }
+
+        if (!summaryText.trim()) {
             emit("context", { message: "compaction returned empty summary — dropping oldest" });
             return [...systemMessages, ...recent];
         }
+
         const summary: LLMMessage = {
-            role: "assistant",
-            content: `[Compacted History] ${resp.content}`,
+            role: "user",
+            content: `[System — Compacted History]\n${summaryText}`,
         };
         emit("context", { message: `compacted ${older.length} messages into summary` });
         return [...systemMessages, summary, ...recent];
@@ -565,13 +839,16 @@ async function compactIfNeeded(
 
 // ─── History Offloading ───────────────────────────────────────────────────
 
-const HISTORY_DIR = resolve(process.cwd(), ".clawagents", "history");
+function getHistoryDir(): string {
+    return resolve(process.cwd(), ".clawagents", "history");
+}
 
 function offloadHistory(messages: LLMMessage[]): string | null {
     try {
-        mkdirSync(HISTORY_DIR, { recursive: true });
+        const historyDir = getHistoryDir();
+        mkdirSync(historyDir, { recursive: true });
         const ts = Date.now();
-        const path = resolve(HISTORY_DIR, `compacted_${ts}_${messages.length}msgs.json`);
+        const path = resolve(historyDir, `compacted_${ts}_${messages.length}msgs.json`);
         const data = messages.map((m) => ({ role: m.role, content: m.content }));
         writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
         return path;
@@ -625,14 +902,26 @@ export async function runAgentGraph(
     learn = false,
     previewChars = 120,
     responseChars = 500,
+    timeoutS = 0,
 ): Promise<AgentState> {
     const registry = tools;
     let nativeSchemas: NativeToolSchema[] | undefined =
         useNativeTools && registry ? registry.toNativeSchemas() : undefined;
     let toolDesc = (!useNativeTools && registry) ? registry.describeForLLM() : "";
     const loopTracker = new ToolCallTracker();
-    const failureTracker = rethink ? new FailureTracker() : undefined;
     const emit = onEvent ?? defaultOnEvent;
+
+    // Feature C + F: detect task type for adaptive rethink threshold
+    let _taskType = "general";
+    let adaptiveThreshold = RETHINK_THRESHOLD;
+    if (rethink || learn) {
+        try {
+            const { detectTaskType, computeAdaptiveRethinkThreshold } = await import("../trajectory/verifier.js");
+            _taskType = detectTaskType(task);
+            adaptiveThreshold = computeAdaptiveRethinkThreshold(_taskType, 0, 0);
+        } catch { /* fallback */ }
+    }
+    const failureTracker = rethink ? new FailureTracker(adaptiveThreshold) : undefined;
 
     // Trajectory recorder (opt-in; learn implies trajectory)
     let recorder: import("../trajectory/recorder.js").TrajectoryRecorder | undefined;
@@ -693,6 +982,11 @@ export async function runAgentGraph(
     );
 
     const t0 = Date.now();
+    const checkTimeout = () => {
+        if (timeoutS > 0 && (Date.now() - t0) / 1000 > timeoutS) {
+            throw new Error(`Agent run exceeded ${timeoutS}s global timeout`);
+        }
+    };
 
     try {
         for (let roundIdx = 0; roundIdx < effectiveMaxRounds; roundIdx++) {
@@ -702,8 +996,18 @@ export async function runAgentGraph(
                 break;
             }
 
+            try {
+                checkTimeout();
+            } catch (err) {
+                emit("warn", { message: String(err) });
+                state.status = "error";
+                state.result = String(err);
+                break;
+            }
+
             // Patch dangling tool calls before sending to LLM
             messages = patchDanglingToolCalls(messages);
+            messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
             messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
 
             if (beforeLLM) {
@@ -738,6 +1042,7 @@ export async function runAgentGraph(
                     const observedRatio = contextWindow / Math.max(estimateMessagesTokens(messages, 1.0), 1);
                     tokenMultiplier = Math.min(observedRatio * 1.1, 3.0);
                     emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)} (retry ${overflowRetries}/${MAX_OVERFLOW_RETRIES})` });
+                    messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
                     messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
                     continue;
                 }
@@ -754,6 +1059,17 @@ export async function runAgentGraph(
                 break;
             }
 
+            // Feature H: extract and preserve thinking tokens (<think>...</think>)
+            let _thinkingContent: string | null = null;
+            if (response.content && response.content.includes("<think>")) {
+                const [clean, thinking] = stripThinkingTokens(response.content);
+                _thinkingContent = thinking;
+                response = {
+                    ...response,
+                    content: clean,
+                };
+            }
+
             // Use exclusively native or text-based tool calls based on user-provided mode
             const nativeToolCallObjects = useNativeTools ? (response.toolCalls ?? []) : [];
             const toolCalls = useNativeTools
@@ -763,7 +1079,7 @@ export async function runAgentGraph(
             if (toolCalls.length === 0) {
                 if (!useNativeTools && looksLikeTruncatedJson(response.content)) {
                     emit("warn", { message: "truncated JSON tool call detected — asking LLM to retry" });
-                    messages.push({ role: "assistant", content: response.content });
+                    messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
                     messages.push({
                         role: "user",
                         content: "Your previous response was cut off mid-JSON. Please resend the complete tool call as valid JSON.",
@@ -776,13 +1092,23 @@ export async function runAgentGraph(
                         response.content || "",
                         response.model,
                         response.tokensUsed,
+                        undefined, undefined, undefined, undefined, undefined,
+                        _thinkingContent,
                     );
                 }
-                state.result = response.content;
+                state.result = sanitizeAssistantText(response.content);
                 state.status = "done";
                 state.iterations += 1;
-                emit("final_content", { content: response.content });
-                messages.push({ role: "assistant", content: response.content });
+                emit("final_content", { content: state.result });
+                messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
+                break;
+            }
+
+            if (loopTracker.isCircuitBroken()) {
+                emit("warn", { message: `circuit breaker tripped (${loopTracker["noProgressCount"]} no-progress calls) — breaking` });
+                state.status = "done";
+                state.result = "Circuit breaker: too many tool calls with no progress. Stopping.";
+                state.iterations += 1;
                 break;
             }
 
@@ -791,6 +1117,15 @@ export async function runAgentGraph(
                 emit("warn", { message: `tool loop detected (${names}) — breaking` });
                 state.status = "done";
                 state.result = `Tool loop detected (${names}). Stopping.`;
+                state.iterations += 1;
+                break;
+            }
+
+            if (loopTracker.isPingPonging()) {
+                const recent = [...new Set(loopTracker["history"].slice(-6))];
+                emit("warn", { message: `ping-pong oscillation detected (${recent.join(" ↔ ")}) — breaking` });
+                state.status = "done";
+                state.result = "Ping-pong loop detected between tools. Stopping.";
                 state.iterations += 1;
                 break;
             }
@@ -862,6 +1197,11 @@ export async function runAgentGraph(
                     preview,
                 });
 
+                // Record result hash for no-progress / circuit breaker detection
+                if (typeof toolOutput === "string") {
+                    loopTracker.recordResult(call.toolName, call.args, toolOutput);
+                }
+
                 // ── Failure tracking + trajectory ──
                 failureTracker?.record(toolResult.success, call.toolName);
                 if (recorder) {
@@ -887,6 +1227,8 @@ export async function runAgentGraph(
                         }],
                         undefined,
                         obsCtx,
+                        undefined, undefined,
+                        _thinkingContent,
                     );
                 }
 
@@ -897,6 +1239,7 @@ export async function runAgentGraph(
                         content: response.content || "",
                         toolCallsMeta: [{ id: nativeTc.toolCallId, name: call.toolName, args: call.args }],
                         ...(response.geminiParts ? { geminiParts: response.geminiParts } : {}),
+                        thinking: _thinkingContent,
                     });
                     const toolContent = typeof toolOutput === "string" ? toolOutput : JSON.stringify(toolOutput);
                     messages.push({
@@ -908,6 +1251,7 @@ export async function runAgentGraph(
                     messages.push({
                         role: "assistant",
                         content: `{"tool": "${call.toolName}", "args": ${JSON.stringify(call.args)}}`,
+                        thinking: _thinkingContent,
                     });
                     messages.push({
                         role: "user",
@@ -915,19 +1259,27 @@ export async function runAgentGraph(
                     });
                 }
 
-                // ── Rethink injection on consecutive failures ──
-                if (failureTracker?.shouldRethink()) {
-                    const nFails = failureTracker.consecutiveFailures;
-                    const rethinkNum = failureTracker.bumpRethink();
-                    emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive tool failures` });
-                    let rethinkMsg = rethinkMessage(nFails);
-                    if (learn) {
-                        const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
-                        const fmtCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "format").length, 0) : 0;
-                        const logicCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "logic").length, 0) : 0;
-                        rethinkMsg = buildRethinkWithLessons(rethinkMsg, fmtCnt, logicCnt);
+                // ── Rethink injection with adaptive threshold ──
+                if (failureTracker) {
+                    try {
+                        const { computeAdaptiveRethinkThreshold } = await import("../trajectory/verifier.js");
+                        failureTracker.threshold = computeAdaptiveRethinkThreshold(
+                            _taskType, roundIdx, state.toolCalls,
+                        );
+                    } catch { /* fallback */ }
+                    if (failureTracker.shouldRethink()) {
+                        const nFails = failureTracker.consecutiveFailures;
+                        const rethinkNum = failureTracker.bumpRethink();
+                        emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive failures (threshold=${failureTracker.threshold})` });
+                        let rethinkMsg = rethinkMessage(nFails);
+                        if (learn) {
+                            const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
+                            const fmtCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "format").length, 0) : 0;
+                            const logicCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "logic").length, 0) : 0;
+                            rethinkMsg = buildRethinkWithLessons(rethinkMsg, fmtCnt, logicCnt);
+                        }
+                        messages.push({ role: "user", content: rethinkMsg });
                     }
-                    messages.push({ role: "user", content: rethinkMsg });
                 }
 
             } else {
@@ -996,6 +1348,13 @@ export async function runAgentGraph(
                     }
                 }
 
+                // Record result hashes for no-progress / circuit breaker detection
+                for (let j = 0; j < approvedCalls.length; j++) {
+                    if (typeof toolOutputs[j] === "string") {
+                        loopTracker.recordResult(approvedCalls[j]!.toolName, approvedCalls[j]!.args, toolOutputs[j]!);
+                    }
+                }
+
                 // ── Failure tracking + trajectory (parallel) ──
                 failureTracker?.recordBatch(
                     approvedCalls.map((c, j) => ({ success: results[j]!.success, toolName: c.toolName })),
@@ -1030,6 +1389,8 @@ export async function runAgentGraph(
                         tcRecords,
                         undefined,
                         obsCtx,
+                        undefined, undefined,
+                        _thinkingContent,
                     );
                 }
 
@@ -1056,6 +1417,7 @@ export async function runAgentGraph(
                         content: response.content || "",
                         toolCallsMeta: tcMeta,
                         ...(response.geminiParts ? { geminiParts: response.geminiParts } : {}),
+                        thinking: _thinkingContent,
                     });
                     for (let idx = 0; idx < approvedCalls.length; idx++) {
                         const ntc = nativeTcMap[idx];
@@ -1069,26 +1431,34 @@ export async function runAgentGraph(
                     const toolCallStr = JSON.stringify(
                         approvedCalls.map((c) => ({ tool: c.toolName, args: c.args })),
                     );
-                    messages.push({ role: "assistant", content: toolCallStr });
+                    messages.push({ role: "assistant", content: toolCallStr, thinking: _thinkingContent });
                     messages.push({
                         role: "user",
                         content: `[Tool Results]\n${callSummaries.join("\n")}`,
                     });
                 }
 
-                // ── Rethink injection on consecutive failures (parallel) ──
-                if (failureTracker?.shouldRethink()) {
-                    const nFails = failureTracker.consecutiveFailures;
-                    const rethinkNum = failureTracker.bumpRethink();
-                    emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive tool failures` });
-                    let rethinkMsg = rethinkMessage(nFails);
-                    if (learn) {
-                        const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
-                        const fmtCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "format").length, 0) : 0;
-                        const logicCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "logic").length, 0) : 0;
-                        rethinkMsg = buildRethinkWithLessons(rethinkMsg, fmtCnt, logicCnt);
+                // ── Rethink injection with adaptive threshold (parallel) ──
+                if (failureTracker) {
+                    try {
+                        const { computeAdaptiveRethinkThreshold } = await import("../trajectory/verifier.js");
+                        failureTracker.threshold = computeAdaptiveRethinkThreshold(
+                            _taskType, roundIdx, state.toolCalls,
+                        );
+                    } catch { /* fallback */ }
+                    if (failureTracker.shouldRethink()) {
+                        const nFails = failureTracker.consecutiveFailures;
+                        const rethinkNum = failureTracker.bumpRethink();
+                        emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive failures (threshold=${failureTracker.threshold})` });
+                        let rethinkMsg = rethinkMessage(nFails);
+                        if (learn) {
+                            const { buildRethinkWithLessons } = await import("../trajectory/lessons.js");
+                            const fmtCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "format").length, 0) : 0;
+                            const logicCnt = recorder ? recorder.getTurns().reduce((s, t) => s + t.toolCalls.filter(tc => !tc.success && tc.failureType === "logic").length, 0) : 0;
+                            rethinkMsg = buildRethinkWithLessons(rethinkMsg, fmtCnt, logicCnt);
+                        }
+                        messages.push({ role: "user", content: rethinkMsg });
                     }
-                    messages.push({ role: "user", content: rethinkMsg });
                 }
             }
         }
@@ -1117,6 +1487,21 @@ export async function runAgentGraph(
         runSummary = recorder.finalize(outcome);
         state.trajectoryFile = runSummary.trajectoryFile;
         emit("context", { message: `trajectory saved to ${runSummary.trajectoryFile}` });
+    }
+
+    // ── Feature G: LLM-as-Judge verification ──
+    if (learn && recorder && runSummary) {
+        try {
+            const { judgeRun } = await import("../trajectory/judge.js");
+            const judgeResult = await judgeRun(
+                llm, task, runSummary, state.result ?? "", recorder.getTurns(),
+            );
+            runSummary.judgeScore = judgeResult.judgeScore;
+            runSummary.judgeJustification = judgeResult.judgeJustification;
+            emit("context", {
+                message: `LLM Judge: score=${runSummary.judgeScore}/3 — ${(runSummary.judgeJustification ?? "").slice(0, 80)}`,
+            });
+        } catch { /* best effort */ }
     }
 
     // ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──

@@ -11,7 +11,18 @@ import { LocalBackend } from "../sandbox/local.js";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_CHARS = 10_000;
 
-const BLOCKED_PATTERNS = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd"];
+const BLOCKED_PATTERNS = [
+    "rm -rf /", "rm -rf /*", "rm -rf .", "rm -rf ~",
+    "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:",
+    "chmod -R 777 /", "chown -R", "> /dev/null",
+];
+
+const DANGEROUS_RE = /(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)\/\s*$|>\s*\/dev\/sd|mkfs\.|dd\s+if=|:\(\)\s*\{/i;
+
+function isDangerousCommand(command: string): boolean {
+    if (DANGEROUS_RE.test(command)) return true;
+    return BLOCKED_PATTERNS.some((p) => command.includes(p));
+}
 
 function createExecTool(sb: SandboxBackend): Tool {
     return {
@@ -33,14 +44,12 @@ function createExecTool(sb: SandboxBackend): Tool {
                 return { success: false, output: "", error: "No command provided" };
             }
 
-            for (const pattern of BLOCKED_PATTERNS) {
-                if (command.includes(pattern)) {
-                    return {
-                        success: false,
-                        output: "",
-                        error: `Blocked potentially destructive command: ${command}`,
-                    };
-                }
+            if (isDangerousCommand(command)) {
+                return {
+                    success: false,
+                    output: "",
+                    error: `Blocked potentially destructive command: ${command}`,
+                };
             }
 
             try {
@@ -95,7 +104,14 @@ export function createExecTools(backend: SandboxBackend): Tool[] {
     return [createExecTool(backend)];
 }
 
-export const execTools: Tool[] = createExecTools(new LocalBackend());
+let _cachedExecTools: Tool[] | null = null;
 
-// Backward-compatible named export
+export function getExecTools(): Tool[] {
+    if (!_cachedExecTools) {
+        _cachedExecTools = createExecTools(new LocalBackend());
+    }
+    return _cachedExecTools;
+}
+
+export const execTools: Tool[] = createExecTools(new LocalBackend());
 export const execTool: Tool = execTools[0]!;

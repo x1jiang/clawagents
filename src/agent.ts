@@ -6,7 +6,8 @@ import {
 } from "./graph/agent-loop.js";
 import type { LLMMessage } from "./providers/llm.js";
 import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig, getDefaultModel } from "./config/config.js";
 import { createProvider } from "./providers/llm.js";
 import { loadMemoryFiles } from "./memory/loader.js";
@@ -85,6 +86,7 @@ export class ClawAgent {
     public maxIterations: number;
     public previewChars: number;
     public responseChars: number;
+    public timeoutS: number;
 
     constructor(
         llm: LLMProvider,
@@ -103,6 +105,7 @@ export class ClawAgent {
         maxIterations = 200,
         previewChars = 120,
         responseChars = 500,
+        timeoutS = 0,
     ) {
         this.llm = llm;
         this.tools = tools;
@@ -120,6 +123,7 @@ export class ClawAgent {
         this.maxIterations = maxIterations;
         this.previewChars = previewChars;
         this.responseChars = responseChars;
+        this.timeoutS = timeoutS;
     }
 
     async invoke(task: string, maxIterations?: number, onEvent?: OnEvent): Promise<AgentState> {
@@ -141,6 +145,7 @@ export class ClawAgent {
             this.learn,
             this.previewChars,
             this.responseChars,
+            this.timeoutS,
         );
     }
 
@@ -167,6 +172,35 @@ export class ClawAgent {
         };
     }
 
+    /**
+     * Run the task N times and return the best result (GRPO-inspired).
+     * Example: const result = await agent.compare("Fix the bug in app.py", 3);
+     */
+    async compare(
+        task: string,
+        nSamples = 3,
+        maxIterations?: number,
+        onEvent?: OnEvent,
+    ): Promise<{ bestResult: string; bestScore: number; bestIndex: number; nSamples: number }> {
+        const { compareSamples } = await import("./trajectory/compare.js");
+        return await compareSamples({
+            task,
+            llm: this.llm,
+            tools: this.tools,
+            systemPrompt: this.systemPrompt,
+            nSamples,
+            maxIterations: maxIterations ?? this.maxIterations,
+            streaming: false,
+            contextWindow: this.contextWindow,
+            onEvent: (onEvent ?? this.onEvent) as any,
+            useNativeTools: this.useNativeTools,
+            rethink: this.rethink,
+            learn: this.learn,
+            previewChars: this.previewChars,
+            responseChars: this.responseChars,
+        });
+    }
+
     /** Truncate tool outputs. Example: agent.truncateOutput(3000) */
     truncateOutput(maxChars = 5000): void {
         this.afterTool = (name, args, result) => {
@@ -190,7 +224,7 @@ export class ClawAgent {
  * @param model       - Model name ("gpt-5", "gemini-3-flash") or LLMProvider. Auto-detects from env if omitted.
  * @param instruction - What the agent should do / how it should behave.
  * @param tools       - Additional tools. Built-in tools always included.
- * @param skills      - Skill directories (default: auto-discovers ./skills).
+ * @param skills      - Skill directories (default: auto-discovers ./skills). The built-in ByteRover skill is always included when present.
  * @param memory      - AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
  *
  * @example
@@ -208,6 +242,8 @@ export class ClawAgent {
 export async function createClawAgent({
     model,
     apiKey,
+    baseUrl,
+    apiVersion,
     instruction,
     tools,
     skills,
@@ -225,9 +261,12 @@ export async function createClawAgent({
     maxIterations,
     previewChars,
     responseChars,
+    timeoutS,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
+    baseUrl?: string;
+    apiVersion?: string;
     instruction?: string;
     tools?: Tool[];
     skills?: string | string[];
@@ -245,6 +284,7 @@ export async function createClawAgent({
     maxIterations?: number;
     previewChars?: number;
     responseChars?: number;
+    timeoutS?: number;
 } = {}): Promise<ClawAgent> {
     // ── Resolve opt-in flags ─────────────────────────────────────────
     const envTrue = (key: string) => ["1", "true", "yes"].includes(
@@ -262,9 +302,10 @@ export async function createClawAgent({
     const resolvedMaxIterations = maxIterations ?? envInt("MAX_ITERATIONS", 200);
     const resolvedPreviewChars = previewChars ?? envInt("CLAW_PREVIEW_CHARS", 120);
     const resolvedResponseChars = responseChars ?? envInt("CLAW_RESPONSE_CHARS", 500);
+    const resolvedTimeoutS = timeoutS ?? envInt("CLAW_TIMEOUT", 0);
 
     // ── Resolve model → LLMProvider ──────────────────────────────────
-    const llm = resolveModel(model, streaming, apiKey, contextWindow, maxTokens, temperature);
+    const llm = await resolveModel(model, streaming, apiKey, contextWindow, maxTokens, temperature, baseUrl, apiVersion);
 
     // ── Resolve sandbox backend ──────────────────────────────────────
     const sb = sandbox ?? new LocalBackend();
@@ -299,7 +340,12 @@ export async function createClawAgent({
     }
 
     // ── Auto-discover skills from default locations ────────────────────
-    const skillDirs = skills !== undefined ? toList(skills) : autoDiscoverSkills();
+    const baseSkillDirs = skills !== undefined ? toList(skills) : autoDiscoverSkills();
+    const byteroverSkillDir = getBundledByteRoverSkillDir();
+    const skillDirs =
+        byteroverSkillDir && existsSync(byteroverSkillDir)
+            ? [...baseSkillDirs, byteroverSkillDir]
+            : baseSkillDirs;
     let skillSummaries: string | null = null;
 
     if (skillDirs.length > 0) {
@@ -320,6 +366,23 @@ export async function createClawAgent({
             skillSummaries = "## Available Skills\nUse the `use_skill` tool to load full instructions.\n" + lines.join("\n");
         }
 
+        // Skill prompt budget limits
+        const MAX_SKILLS_PROMPT_CHARS = 4000;
+        const MAX_SKILLS_IN_PROMPT = 20;
+
+        if (skillSummaries) {
+            const skillLines = skillSummaries.split("\n").filter(l => l.startsWith("- **"));
+            if (skillLines.length > MAX_SKILLS_IN_PROMPT) {
+                const truncated = skillLines.slice(0, MAX_SKILLS_IN_PROMPT);
+                skillSummaries = "## Available Skills\nUse the `use_skill` tool to load full instructions.\n" +
+                    truncated.join("\n") + `\n\n(${skillLines.length - MAX_SKILLS_IN_PROMPT} more skills available — use list_skills to see all)`;
+            }
+            if (skillSummaries.length > MAX_SKILLS_PROMPT_CHARS) {
+                skillSummaries = skillSummaries.slice(0, MAX_SKILLS_PROMPT_CHARS) +
+                    "\n\n...(skill list truncated — use list_skills to see all)";
+            }
+        }
+
         for (const skillTool of createSkillTools(skillStore)) {
             if (skillTool.name === "use_skill") {
                 registry.register(skillTool);
@@ -338,6 +401,7 @@ export async function createClawAgent({
         llm, registry, instruction, streaming, useNativeTools, resolvedContextWindow, onEvent,
         composedBeforeLLM ?? undefined, undefined, undefined, enableTrajectory, enableRethink,
         enableLearn, resolvedMaxIterations, resolvedPreviewChars, resolvedResponseChars,
+        resolvedTimeoutS,
     );
 
     // ── Sub-agent tool (always available) ────────────────────────────
@@ -349,14 +413,16 @@ export async function createClawAgent({
 
 // ─── Internal Helpers ────────────────────────────────────────────────────────
 
-function resolveModel(
+async function resolveModel(
     model: string | LLMProvider | undefined,
     streaming: boolean,
     apiKey?: string,
     contextWindow?: number,
     maxTokens?: number,
     temperature?: number,
-): LLMProvider {
+    baseUrl?: string,
+    apiVersion?: string,
+): Promise<LLMProvider> {
     if (model && typeof model !== "string") {
         return model;
     }
@@ -366,6 +432,8 @@ function resolveModel(
     if (contextWindow !== undefined) config.contextWindow = contextWindow;
     if (maxTokens !== undefined) config.maxTokens = maxTokens;
     if (temperature !== undefined) config.temperature = temperature;
+    if (baseUrl !== undefined) config.openaiBaseUrl = baseUrl;
+    if (apiVersion !== undefined) config.openaiApiVersion = apiVersion;
 
     const activeModel = (typeof model === "string" && model) ? model : getDefaultModel(config);
 
@@ -378,7 +446,7 @@ function resolveModel(
         }
     }
 
-    return createProvider(activeModel, config);
+    return await createProvider(activeModel, config);
 }
 
 function toList(value: string | string[] | undefined): string[] {
@@ -390,6 +458,12 @@ function toList(value: string | string[] | undefined): string[] {
 // Default locations for auto-discovery
 const DEFAULT_MEMORY_FILES = ["AGENTS.md", "CLAWAGENTS.md"];
 const DEFAULT_SKILL_DIRS = ["skills", ".skills", "skill", ".skill", "Skills"];
+
+/** Path to the bundled ByteRover skill (ClawHub byteroverinc/byterover). */
+function getBundledByteRoverSkillDir(): string {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    return resolve(__dirname, "..", "skills", "byterover");
+}
 
 function autoDiscoverMemory(): string[] {
     const cwd = process.cwd();

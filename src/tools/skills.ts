@@ -9,6 +9,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import { existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import type { Tool, ToolResult } from "./registry.js";
 
 export interface Skill {
@@ -18,6 +19,12 @@ export interface Skill {
     path: string;
     /** Tool names the skill recommends using (from YAML `allowed-tools` field). */
     allowedTools?: string[];
+    /** Runtime eligibility requirements parsed from YAML frontmatter. */
+    requires?: {
+        os?: string;
+        bins?: string[];
+        env?: string[];
+    };
 }
 
 /**
@@ -30,6 +37,7 @@ function parseSkillFile(content: string, filePath: string): Skill {
     let description = "";
     let body = content;
     let allowedTools: string[] = [];
+    let requires: Skill["requires"];
 
     // Parse YAML frontmatter if present
     const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
@@ -48,9 +56,49 @@ function parseSkillFile(content: string, filePath: string): Skill {
         if (toolsMatch) {
             allowedTools = toolsMatch[1]!.split(/[\s,]+/).filter(Boolean);
         }
+
+        // Parse requires block for eligibility gating
+        const osMatch = yaml.match(/^requires\.os:\s*(.+)$/m)
+            ?? yaml.match(/^\s+os:\s*(.+)$/m);
+        const binsMatch = yaml.match(/^requires\.bins:\s*(.+)$/m)
+            ?? yaml.match(/^\s+bins:\s*(.+)$/m);
+        const envMatch = yaml.match(/^requires\.env:\s*(.+)$/m)
+            ?? yaml.match(/^\s+env:\s*(.+)$/m);
+
+        if (osMatch || binsMatch || envMatch) {
+            const parseList = (raw: string): string[] =>
+                raw.replace(/[\[\]"']/g, "").split(/[\s,]+/).filter(Boolean);
+
+            requires = {
+                os: osMatch ? osMatch[1]!.trim() : undefined,
+                bins: binsMatch ? parseList(binsMatch[1]!) : undefined,
+                env: envMatch ? parseList(envMatch[1]!) : undefined,
+            };
+        }
     }
 
-    return { name, description, content: body.trim(), path: filePath, allowedTools };
+    return { name, description, content: body.trim(), path: filePath, allowedTools, requires };
+}
+
+function isSkillEligible(skill: Skill): boolean {
+    if (!skill.requires) return true;
+    const req = skill.requires;
+    if (req.os && process.platform !== req.os) return false;
+    if (req.bins) {
+        for (const bin of req.bins) {
+            try {
+                execSync(`which ${bin}`, { stdio: "ignore" });
+            } catch {
+                return false;
+            }
+        }
+    }
+    if (req.env) {
+        for (const envVar of req.env) {
+            if (!process.env[envVar]) return false;
+        }
+    }
+    return true;
 }
 
 // ─── Skill Store ───────────────────────────────────────────────────────────
@@ -76,13 +124,17 @@ export class SkillStore {
                             if (existsSync(skillFile)) {
                                 const content = await readFile(skillFile, "utf-8");
                                 const skill = parseSkillFile(content, skillFile);
-                                this.skills.set(skill.name, skill);
+                                if (isSkillEligible(skill)) {
+                                    this.skills.set(skill.name, skill);
+                                }
                             }
                         } else if (entry.name.endsWith(".md")) {
                             const skillFile = resolve(dir, entry.name);
                             const content = await readFile(skillFile, "utf-8");
                             const skill = parseSkillFile(content, skillFile);
-                            this.skills.set(skill.name, skill);
+                            if (isSkillEligible(skill)) {
+                                this.skills.set(skill.name, skill);
+                            }
                         }
                     } catch { /* unreadable skill file — skip */ }
                 }
