@@ -74,6 +74,7 @@ function createLsTool(sb: SandboxBackend): Tool {
 function createReadFileTool(sb: SandboxBackend): Tool {
     return {
         name: "read_file",
+        cacheable: true,
         description: "Read file contents with line numbers. Supports offset/limit for pagination.",
         parameters: {
             path: { type: "string", description: "Path to the file to read", required: true },
@@ -216,6 +217,7 @@ async function* walkDir(
 function createGrepTool(sb: SandboxBackend): Tool {
     return {
         name: "grep",
+        cacheable: true,
         description: "Search for a text pattern in files. Supports recursive multi-file search with glob filtering.",
         parameters: {
             path: { type: "string", description: "File or directory to search", required: true },

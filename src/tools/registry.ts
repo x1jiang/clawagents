@@ -25,12 +25,17 @@ export interface Tool {
     description: string;
     parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>;
     execute(args: Record<string, unknown>): Promise<ToolResult>;
+    /** When true, results are cached by (name, args) with a configurable TTL. */
+    cacheable?: boolean;
 }
 
 export interface ParsedToolCall {
     toolName: string;
     args: Record<string, unknown>;
 }
+
+import { ResultCacheManager } from "./cache.js";
+import { validateToolArgs, formatValidationErrors } from "./validate.js";
 
 // ─── Constants (aligned with deepagents/openclaw) ─────────────────────────
 
@@ -57,9 +62,24 @@ export class ToolRegistry {
     private tools = new Map<string, Tool>();
     private _descriptionCache: string | null = null;
     private _toolTimeoutMs: number;
+    private _resultCache: ResultCacheManager;
+    private _validateArgs: boolean;
 
-    constructor(toolTimeoutMs = DEFAULT_TOOL_TIMEOUT_MS) {
+    constructor(toolTimeoutMs = DEFAULT_TOOL_TIMEOUT_MS, opts?: {
+        cacheMaxSize?: number;
+        cacheTtlMs?: number;
+        validateArgs?: boolean;
+    }) {
         this._toolTimeoutMs = toolTimeoutMs;
+        this._resultCache = new ResultCacheManager(
+            opts?.cacheMaxSize ?? 256,
+            opts?.cacheTtlMs ?? 60_000,
+        );
+        this._validateArgs = opts?.validateArgs ?? true;
+    }
+
+    get resultCache(): ResultCacheManager {
+        return this._resultCache;
     }
 
     register(tool: Tool): void {
@@ -158,10 +178,31 @@ export class ToolRegistry {
         if (!tool) {
             return { success: false, output: "", error: `Unknown tool: ${toolName}` };
         }
+
+        // Parameter validation with lenient coercion
+        let effectiveArgs = args;
+        if (this._validateArgs) {
+            const validation = validateToolArgs(tool, args);
+            if (!validation.valid) {
+                return {
+                    success: false,
+                    output: "",
+                    error: `Invalid parameters:\n${formatValidationErrors(validation.errors)}`,
+                };
+            }
+            effectiveArgs = validation.coerced;
+        }
+
+        // Cache lookup for cacheable tools
+        if (tool.cacheable) {
+            const cached = this._resultCache.get(toolName, effectiveArgs);
+            if (cached) return cached;
+        }
+
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
             const result = await Promise.race([
-                tool.execute(args),
+                tool.execute(effectiveArgs),
                 new Promise<never>((_, reject) => {
                     timer = setTimeout(() => reject(new Error(
                         `Tool "${toolName}" timed out after ${this._toolTimeoutMs / 1000}s. ` +
@@ -169,7 +210,14 @@ export class ToolRegistry {
                     )), this._toolTimeoutMs);
                 }),
             ]);
-            return { ...result, output: truncateToolOutput(result.output) };
+            const truncated = { ...result, output: truncateToolOutput(result.output) };
+
+            // Cache successful results for cacheable tools
+            if (tool.cacheable && truncated.success) {
+                this._resultCache.set(toolName, effectiveArgs, truncated);
+            }
+
+            return truncated;
         } catch (err) {
             return { success: false, output: "", error: `Tool error: ${String(err)}` };
         } finally {

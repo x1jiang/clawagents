@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.21.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.22.0**
 
 ## Installation
 
@@ -455,6 +455,16 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.22.0 — Tool Result Caching, Parameter Validation & ComposeTool
+
+3 features inspired by ToolUniverse's tool management patterns:
+
+| Feature | Description |
+|:---|:---|
+| **Tool result caching** | LRU in-memory cache (`ResultCacheManager`) avoids redundant tool calls. Tools opt in with `cacheable: true`. Per-tool TTL overrides via `resultCache.setToolTtl()`. Built-in cacheable tools: `read_file`, `grep`, `web_fetch`. Default: 256 entries, 60s TTL |
+| **Parameter validation + coercion** | `validateToolArgs()` checks required params and type-matches before execution. Lenient coercion handles common LLM quirks: `"42"` → `42`, `"true"` → `true`, JSON strings → objects/arrays. Enabled by default on `ToolRegistry` |
+| **ComposeTool** | `createComposeTool()` chains multiple tools in a deterministic pipeline without an LLM in the loop. Lighter than sub-agents for predictable workflows. Steps receive previous results and a `callTool` helper. Failures short-circuit with clear error messages |
 
 ### v5.21.0 — Context Engine, Loop Detection & Compaction Overhaul
 
