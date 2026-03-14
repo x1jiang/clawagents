@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.22.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.23.0**
 
 ## Installation
 
@@ -455,6 +455,31 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.23.0 — WebSocket Gateway, Multi-Channel Messaging (Telegram, WhatsApp, Signal)
+
+Full multi-platform messaging support inspired by OpenClaw's channel architecture:
+
+| Feature | Description |
+|:---|:---|
+| **WebSocket gateway** | JSON-RPC-over-WS endpoint at `/ws` alongside existing HTTP. Methods: `chat.send` (streaming events), `chat.history`, `chat.inject`, `ping`. Auth via `?token=` query param |
+| **Channel adapter interface** | `ChannelAdapter` / `ChannelMessage` types — standard contract for any messaging platform. Implement `start()`, `stop()`, `send()`, set `onMessage` callback |
+| **Telegram adapter** | Uses [grammY](https://grammy.dev/) for Bot API. Config: `{ botToken: "..." }` |
+| **WhatsApp adapter** | Uses [Baileys](https://github.com/WhiskeySockets/Baileys) for multi-device. QR pairing on first run. Config: `{ authDir: ".whatsapp-auth" }` |
+| **Signal adapter** | Uses [signal-cli](https://github.com/AsamK/signal-cli) subprocess with JSON-RPC. Config: `{ account: "+1234567890" }` |
+| **Channel router** | `ChannelRouter` dispatches inbound messages to agents, routes replies back. Per-session serialization via `KeyedAsyncQueue`, optional debouncer, `onInbound`/`onOutbound`/`onError` hooks |
+
+```ts
+import { createClawAgent, ChannelRouter, TelegramAdapter, WhatsAppAdapter } from "clawagents";
+
+const router = new ChannelRouter(() => createClawAgent({ model: "gpt-5-mini" }));
+router.register(new TelegramAdapter());
+router.register(new WhatsAppAdapter());
+await router.startAll({
+  telegram: { botToken: "123456:ABC..." },
+  whatsapp: { authDir: ".whatsapp-auth" },
+});
+```
 
 ### v5.22.0 — Tool Result Caching, Parameter Validation & ComposeTool
 

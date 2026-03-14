@@ -46,6 +46,15 @@ export { stripThinkingTokens } from "./providers/llm.js";
 export type { ContextEngine, ContextEngineConfig } from "./context/index.js";
 export { DefaultContextEngine, registerContextEngine, resolveContextEngine, listContextEngines } from "./context/index.js";
 
+// Channels & WebSocket
+export type { ChannelMessage, ChannelAdapter, AgentFactory, ChannelRouterOptions } from "./channels/index.js";
+export { ChannelRouter, KeyedAsyncQueue } from "./channels/index.js";
+export { TelegramAdapter } from "./channels/telegram.js";
+export { WhatsAppAdapter } from "./channels/whatsapp.js";
+export { SignalAdapter } from "./channels/signal.js";
+export type { WsRequest, WsResponse, WsEvent } from "./gateway/protocol.js";
+export { attachWebSocket } from "./gateway/ws.js";
+
 // ─── Banner ──────────────────────────────────────────────────────────────
 
 function buildBanner(): string {

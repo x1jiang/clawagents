@@ -9,6 +9,7 @@ import {
 } from "../process/command-queue.js";
 import { CommandLane } from "../process/lanes.js";
 import { createClawAgent } from "../agent.js";
+import { attachWebSocket } from "./ws.js";
 
 const VALID_LANES = new Set<string>(["main", "cron", "subagent", "nested"]);
 
@@ -49,13 +50,15 @@ export async function startGateway(port: number = 3000) {
         }
     });
 
+    attachWebSocket(server, llm, gatewayApiKey);
+
     const authStatus = gatewayApiKey ? "enabled" : "disabled (set GATEWAY_API_KEY to enable)";
     server.listen(port, () => {
         console.log(`\n🦞 ClawAgents Gateway running on http://localhost:${port}`);
         console.log(`   Provider: ${llm.name}`);
         console.log(`   Model: ${activeModel}`);
         console.log(`   Auth: ${authStatus}`);
-        console.log(`   Endpoints: POST /chat | POST /chat/stream | GET /queue | GET /health\n`);
+        console.log(`   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n`);
     });
 
     return server;
