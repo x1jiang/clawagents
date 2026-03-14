@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.23.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.24.0**
 
 ## Installation
 
@@ -455,6 +455,14 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.24.0 — Zero-Config Channel Auto-Detection
+
+| Feature | Description |
+|:---|:---|
+| **Auto-detect channels from env vars** | Gateway now reads `TELEGRAM_BOT_TOKEN`, `WHATSAPP_AUTH_DIR`, `SIGNAL_ACCOUNT` from env and auto-starts the ChannelRouter — zero code required |
+| **`--doctor` channel status** | Doctor command reports which messaging channels are configured |
+| **`.env.example` updated** | All channel env vars documented with inline comments |
 
 ### v5.23.0 — WebSocket Gateway, Multi-Channel Messaging (Telegram, WhatsApp, Signal)
 
