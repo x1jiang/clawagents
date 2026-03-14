@@ -14,6 +14,7 @@ import { createClawAgent } from "./agent.js";
 import { startGateway } from "./gateway/server.js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { detectChannels } from "./channels/auto.js";
 
 // Re-export public API
 export { createClawAgent, ClawAgent, LangChainToolAdapter } from "./agent.js";
@@ -54,6 +55,8 @@ export { WhatsAppAdapter } from "./channels/whatsapp.js";
 export { SignalAdapter } from "./channels/signal.js";
 export type { WsRequest, WsResponse, WsEvent } from "./gateway/protocol.js";
 export { attachWebSocket } from "./gateway/ws.js";
+export { detectChannels, startChannelRouter } from "./channels/auto.js";
+export type { DetectedChannel } from "./channels/auto.js";
 
 // ─── Banner ──────────────────────────────────────────────────────────────
 
@@ -180,6 +183,14 @@ async function cmdDoctor() {
         check("AGENTS.md", true, `${size} bytes`);
     } else {
         check("AGENTS.md", true, "not found (optional)");
+    }
+
+    // 11. Messaging channels
+    const detected = detectChannels();
+    if (detected.length > 0) {
+        check("Messaging channels", true, detected.map(c => c.description).join(", "));
+    } else {
+        check("Messaging channels", true, "none configured (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)");
     }
 
     process.stderr.write("\n" + "=".repeat(40) + "\n");

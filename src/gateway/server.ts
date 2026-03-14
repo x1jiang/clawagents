@@ -10,6 +10,7 @@ import {
 import { CommandLane } from "../process/lanes.js";
 import { createClawAgent } from "../agent.js";
 import { attachWebSocket } from "./ws.js";
+import { detectChannels, startChannelRouter } from "../channels/auto.js";
 
 const VALID_LANES = new Set<string>(["main", "cron", "subagent", "nested"]);
 
@@ -53,12 +54,26 @@ export async function startGateway(port: number = 3000) {
     attachWebSocket(server, llm, gatewayApiKey);
 
     const authStatus = gatewayApiKey ? "enabled" : "disabled (set GATEWAY_API_KEY to enable)";
-    server.listen(port, () => {
+    const detectedChannels = detectChannels();
+    const channelDesc = detectedChannels.length
+        ? detectedChannels.map(c => c.description).join(", ")
+        : "none (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)";
+
+    server.listen(port, async () => {
         console.log(`\n🦞 ClawAgents Gateway running on http://localhost:${port}`);
         console.log(`   Provider: ${llm.name}`);
         console.log(`   Model: ${activeModel}`);
         console.log(`   Auth: ${authStatus}`);
-        console.log(`   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health\n`);
+        console.log(`   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health`);
+        console.log(`   Channels: ${channelDesc}\n`);
+
+        if (detectedChannels.length > 0) {
+            try {
+                await startChannelRouter(llm);
+            } catch (err) {
+                console.error("[Gateway] Failed to start channels:", err);
+            }
+        }
     });
 
     return server;
