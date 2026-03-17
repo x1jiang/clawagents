@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.24.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.25.0**
 
 ## Installation
 
@@ -455,6 +455,13 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.25.0 — Gemini Streaming Fix
+
+| Feature | Description |
+|:---|:---|
+| **Fix Gemini SDK warning** | Eliminated "non-text parts in the response" warning by iterating `candidates[].content.parts[]` instead of accessing the `.text` property on streaming chunks containing function calls |
+| **Consistent text extraction** | Streaming path now uses the same parts-based extraction as the non-streaming `requestOnce`, filtering out thought parts |
 
 ### v5.24.0 — Zero-Config Channel Auto-Detection
 

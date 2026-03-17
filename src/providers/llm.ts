@@ -690,11 +690,6 @@ export class GeminiProvider implements LLMProvider {
                     }
 
                     try {
-                        if ((chunk as any).text) {
-                            chunks.push((chunk as any).text);
-                            try { options.onChunk!((chunk as any).text); } catch { /* callback error — isolated */ }
-                        }
-                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
                         const candidates = (chunk as any).candidates;
                         if (candidates) {
                             for (const candidate of candidates) {
@@ -705,6 +700,10 @@ export class GeminiProvider implements LLMProvider {
                                 if (parts) {
                                     for (const p of parts) {
                                         allStreamParts.push(p);
+                                        if (typeof p?.text === "string" && !p?.thought) {
+                                            chunks.push(p.text);
+                                            try { options.onChunk!(p.text); } catch { /* callback error — isolated */ }
+                                        }
                                         if (p?.functionCall) {
                                             fnCalls.push({
                                                 toolName: p.functionCall.name as string,
