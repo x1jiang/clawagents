@@ -224,7 +224,7 @@ export class ClawAgent {
  * @param model       - Model name ("gpt-5", "gemini-3-flash") or LLMProvider. Auto-detects from env if omitted.
  * @param instruction - What the agent should do / how it should behave.
  * @param tools       - Additional tools. Built-in tools always included.
- * @param skills      - Skill directories (default: auto-discovers ./skills). The built-in ByteRover skill is always included when present.
+ * @param skills      - Skill directories (default: auto-discovers ./skills). Bundled skills (ByteRover, OpenViking) are always included when eligible.
  * @param memory      - AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
  *
  * @example
@@ -341,10 +341,10 @@ export async function createClawAgent({
 
     // ── Auto-discover skills from default locations ────────────────────
     const baseSkillDirs = skills !== undefined ? toList(skills) : autoDiscoverSkills();
-    const byteroverSkillDir = getBundledByteRoverSkillDir();
+    const bundledSkillsDir = getBundledSkillsDir();
     const skillDirs =
-        byteroverSkillDir && existsSync(byteroverSkillDir)
-            ? [...baseSkillDirs, byteroverSkillDir]
+        bundledSkillsDir && existsSync(bundledSkillsDir)
+            ? [...baseSkillDirs, bundledSkillsDir]
             : baseSkillDirs;
     let skillSummaries: string | null = null;
 
@@ -459,10 +459,10 @@ function toList(value: string | string[] | undefined): string[] {
 const DEFAULT_MEMORY_FILES = ["AGENTS.md", "CLAWAGENTS.md"];
 const DEFAULT_SKILL_DIRS = ["skills", ".skills", "skill", ".skill", "Skills"];
 
-/** Path to the bundled ByteRover skill (ClawHub byteroverinc/byterover). */
-function getBundledByteRoverSkillDir(): string {
+/** Path to all bundled skills (byterover, openviking, etc.). */
+function getBundledSkillsDir(): string {
     const __dirname = dirname(fileURLToPath(import.meta.url));
-    return resolve(__dirname, "..", "skills", "byterover");
+    return resolve(__dirname, "..", "skills");
 }
 
 function autoDiscoverMemory(): string[] {

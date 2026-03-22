@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.25.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.26.0**
 
 ## Installation
 
@@ -269,7 +269,7 @@ All parameters are **optional** — zero-config usage (`createClawAgent()`) work
 |:---|:---|:---|:---:|:---|
 | `instruction` | `string` | `undefined` | No | System prompt — what the agent should do and how to behave |
 | `tools` | `Tool[]` | `[]` | No | Additional tools. Built-in tools (filesystem, exec, grep, etc.) always included |
-| `skills` | `string \| string[]` | auto-discover | No | Skill directories. Default: checks `./skills`, `./.skills`. Built-in ByteRover skill is always included. |
+| `skills` | `string \| string[]` | auto-discover | No | Skill directories. Default: checks `./skills`, `./.skills`. Bundled skills (ByteRover, OpenViking) are always included when eligible. |
 | `memory` | `string \| string[]` | auto-discover | No | Memory files. Default: checks `./AGENTS.md`, `./CLAWAGENTS.md` |
 | `streaming` | `boolean` | `true` | No | Enable streaming responses |
 | `useNativeTools` | `boolean` | `true` | No | Use provider native function calling. `false` = text-based JSON tool calls |
@@ -347,7 +347,29 @@ The factory automatically discovers project files:
 | What | Default locations checked |
 |:---|:---|
 | **Memory** | `./AGENTS.md`, `./CLAWAGENTS.md` |
-| **Skills** | `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Built-in [ByteRover](https://clawhub.ai/byteroverinc/byterover) skill is always included. **CLI:** npm installs `byterover-cli` as an optional dependency (so `brv` is on PATH when running from project root); Python runs `brv` via `npx byterover-cli` when Node is available.
+| **Skills** | `./skills`, `./.skills`, `./skill`, `./.skill`, `./Skills`. Bundled skills are auto-included based on eligibility (see below). |
+
+### Bundled Skills
+
+ClawAgents ships with two complementary bundled skills that work together:
+
+| Skill | Purpose | Prerequisite | Auto-enabled? |
+|:---|:---|:---|:---:|
+| **[ByteRover](https://clawhub.ai/byteroverinc/byterover)** | **Write** decisions, patterns, and rules to local Markdown files | npm installs `byterover-cli` as optional dep (so `brv` is on PATH from project root) | Always |
+| **[OpenViking](https://github.com/volcengine/OpenViking)** | **Read** context from repos, docs, and large knowledge bases with tiered L0/L1/L2 loading | `pip install openviking` + running `openviking-server` | Only when `ov` CLI is on PATH |
+
+**How they complement each other:**
+
+- **ByteRover** is a fast, serverless notebook for the agent. Use `brv curate` to persist decisions ("We chose Postgres for ACID compliance") and `brv query` to recall them. No infrastructure needed — context is stored as Markdown in `.brv/context-tree/`.
+- **OpenViking** is a structured context database. Use `ov add-resource` to ingest entire repos or doc sites, then `ov find` for semantic search across all indexed content. Results are organized in a virtual filesystem (`viking://`) with three tiers: **L0** (abstract, ~100 tokens), **L1** (overview, ~2k tokens), **L2** (full content) — the agent loads only what it needs, saving tokens.
+
+**Typical workflow:** OpenViking **retrieves** context → agent works on the task → ByteRover **curates** the decisions made.
+
+**OpenViking prerequisites:**
+1. Install: `pip install openviking --upgrade`
+2. Configure: create `~/.openviking/ov.conf` with embedding model and VLM settings (see [OpenViking docs](https://github.com/volcengine/OpenViking))
+3. Start server: `openviking-server`
+4. The `ov` CLI must be on your PATH — the skill auto-enables when detected
 
 Pass explicit paths to override: `memory: "./docs/AGENTS.md"`, `skills: ["./my-skills"]`
 
@@ -455,6 +477,14 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.26.0 — Bundled OpenViking Skill, Updated ByteRover Skill
+
+| Feature | Description |
+|:---|:---|
+| **OpenViking skill** | Bundled `skills/openviking/SKILL.md` teaches the agent to use the `ov` CLI for tiered context retrieval (L0/L1/L2). Auto-enabled when `ov` is on PATH |
+| **ByteRover skill updated** | Refreshed to match `byterover-cli` v1.8.0 — added `--headless`, `--folder`, removed obsolete commands |
+| **Generic bundled skill loader** | Skill loader now scans the entire bundled `skills/` directory instead of hardcoding individual skills |
 
 ### v5.25.0 — Gemini Streaming Fix
 
