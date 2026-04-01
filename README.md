@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.26.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.27.0**
 
 ## Installation
 
@@ -477,6 +477,21 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_RESPONSE_CHARS` | `500` | No | Max chars for LLM response text in trajectory records |
 
 ## Changelog
+
+### v5.27.0 — Claude Code Architectural Patterns
+
+Ported 10 production-grade architectural patterns from Anthropic's Claude Code directly into ClawAgents. These features are controllable via environment variables or constructor injection:
+
+| Feature | Description |
+|:---|:---|
+| **Micro-Compact Memory** | Aggressively clears giant tool results to save context. |
+| **File History Snapshots** | Safely backs up files to `.clawagents/snapshots/` before writing. |
+| **Prompt Cache Tracking** | Real-time stats on Anthropic/OpenAI prompt cache hits. |
+| **Typed Memory Taxonomy** | Auto-parses `project`, `user`, and `feedback` memories via frontmatter. |
+| **Write-Ahead Logging (WAL)** | Crash-resilient interaction logging. |
+| **Granular Permission Rules** | Define glob-based `Allow`/`Deny` execution policies. |
+| **Background Memory Extraction** | Periodically scans conversations and extracts metadata. |
+| **Orchestration** | Access to `run_forked_agent` and `run_coordinator` (swarm routing). |
 
 ### v5.26.0 — Bundled OpenViking Skill, Updated ByteRover Skill
 

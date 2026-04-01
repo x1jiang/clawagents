@@ -48,6 +48,10 @@ export interface LLMResponse {
     partial?: boolean;
     toolCalls?: NativeToolCall[];
     geminiParts?: Array<Record<string, unknown>>;  // Preserved Gemini response parts (thought/thought_signature)
+    // Prompt cache tracking (Claude Code pattern)
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+    promptTokens?: number;
 }
 
 export interface StreamOptions {

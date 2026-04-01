@@ -87,7 +87,17 @@ export class ClawAgent {
     public previewChars: number;
     public responseChars: number;
     public timeoutS: number;
+    public features?: Record<string, boolean>;
 
+    /**
+     * @param llm - The instantiated LLM provider structure
+     * @param tools - The registry containing tool execution interfaces
+     * @param systemPrompt - Base instructions controlling agent behavior
+     * @param streaming - Send intermediate tokens from the LLM via events
+     * @param useNativeTools - Pass tool specifications natively in API payload
+     * @param contextWindow - Maximum LLM tokens permitted within history before garbage collection
+     * @param features - Dictionary overrides for advanced architectural configurations (e.g. `{ wal: true }`)
+     */
     constructor(
         llm: LLMProvider,
         tools: ToolRegistry,
@@ -106,6 +116,7 @@ export class ClawAgent {
         previewChars = 120,
         responseChars = 500,
         timeoutS = 0,
+        features?: Record<string, boolean>,
     ) {
         this.llm = llm;
         this.tools = tools;
@@ -124,9 +135,17 @@ export class ClawAgent {
         this.previewChars = previewChars;
         this.responseChars = responseChars;
         this.timeoutS = timeoutS;
+        this.features = features;
     }
 
-    async invoke(task: string, maxIterations?: number, onEvent?: OnEvent): Promise<AgentState> {
+    /**
+     * Executes the ReAct sequence against the LLM
+     * @param task - The query or task formulation provided by the user
+     * @param maxIterations - (Optional) override max bounds loops
+     * @param onEvent - (Optional) runtime stream callback to track the status changes
+     * @param features - (Optional) dictionary matching process.env CLAW_FEATURE flags to override
+     */
+    async invoke(task: string, maxIterations?: number, onEvent?: OnEvent, features?: Record<string, boolean>): Promise<AgentState> {
         return await runAgentGraph(
             task,
             this.llm,
@@ -146,6 +165,7 @@ export class ClawAgent {
             this.previewChars,
             this.responseChars,
             this.timeoutS,
+            features ?? this.features,
         );
     }
 
@@ -226,6 +246,7 @@ export class ClawAgent {
  * @param tools       - Additional tools. Built-in tools always included.
  * @param skills      - Skill directories (default: auto-discovers ./skills). Bundled skills (ByteRover, OpenViking) are always included when eligible.
  * @param memory      - AGENTS.md paths (default: auto-discovers ./AGENTS.md, ./CLAWAGENTS.md).
+ * @param features    - Architectural flag overrides (e.g. { micro_compact: false, wal: true })
  *
  * @example
  * ```ts
@@ -262,6 +283,7 @@ export async function createClawAgent({
     previewChars,
     responseChars,
     timeoutS,
+    features,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
@@ -285,6 +307,7 @@ export async function createClawAgent({
     previewChars?: number;
     responseChars?: number;
     timeoutS?: number;
+    features?: Record<string, boolean>;
 } = {}): Promise<ClawAgent> {
     // ── Resolve opt-in flags ─────────────────────────────────────────
     const envTrue = (key: string) => ["1", "true", "yes"].includes(
@@ -401,7 +424,7 @@ export async function createClawAgent({
         llm, registry, instruction, streaming, useNativeTools, resolvedContextWindow, onEvent,
         composedBeforeLLM ?? undefined, undefined, undefined, enableTrajectory, enableRethink,
         enableLearn, resolvedMaxIterations, resolvedPreviewChars, resolvedResponseChars,
-        resolvedTimeoutS,
+        resolvedTimeoutS, features,
     );
 
     // ── Sub-agent tool (always available) ────────────────────────────

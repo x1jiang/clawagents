@@ -36,6 +36,8 @@ export interface ParsedToolCall {
 
 import { ResultCacheManager } from "./cache.js";
 import { validateToolArgs, formatValidationErrors } from "./validate.js";
+import { resolve } from "node:path";
+import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 
 // ─── Constants (aligned with deepagents/openclaw) ─────────────────────────
 
@@ -54,6 +56,40 @@ export function truncateToolOutput(
     const tail = output.slice(-TRUNCATION_TAIL_CHARS);
     const dropped = output.length - TRUNCATION_HEAD_CHARS - TRUNCATION_TAIL_CHARS;
     return `${head}\n\n[… truncated ${dropped} characters …]\n\n${tail}`;
+}
+
+
+// ─── File Snapshots (learned from Claude Code: fileHistoryMakeSnapshot) ────
+// Before write tools modify a file, snapshot it for undo/rollback capability.
+
+export const WRITE_TOOLS = new Set([
+    "write_file", "edit_file", "create_file", "replace_in_file",
+    "insert_in_file", "patch_file",
+]);
+
+export function snapshotBeforeWrite(toolName: string, args: Record<string, unknown>): void {
+    try {
+        const envVal = process.env["CLAW_FEATURE_FILE_SNAPSHOTS"] ?? "1";
+        if (!["1", "true", "yes", "on"].includes(envVal.toLowerCase())) return;
+    } catch { return; }
+
+    if (!WRITE_TOOLS.has(toolName)) return;
+
+    const pathStr = (args.path || args.file_path || args.target_path || "") as string;
+    if (!pathStr) return;
+
+    try {
+        if (!existsSync(pathStr) || !statSync(pathStr).isFile()) return;
+
+        const ts = Math.floor(Date.now() / 1000);
+        const snapDir = resolve(process.cwd(), ".clawagents", "snapshots", String(ts));
+        mkdirSync(snapDir, { recursive: true });
+
+        const basename = pathStr.split("/").pop() || pathStr.split("\\").pop() || "file";
+        copyFileSync(pathStr, resolve(snapDir, basename));
+    } catch {
+        // Snapshot failure should never block tool execution
+    }
 }
 
 // ─── Tool Registry ─────────────────────────────────────────────────────────
@@ -201,6 +237,9 @@ export class ToolRegistry {
 
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
+            // File snapshot before write tools (Claude Code pattern)
+            snapshotBeforeWrite(toolName, effectiveArgs);
+
             const result = await Promise.race([
                 tool.execute(effectiveArgs),
                 new Promise<never>((_, reject) => {

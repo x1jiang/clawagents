@@ -23,8 +23,9 @@
 import type { LLMProvider, LLMMessage, StreamOptions, LLMResponse, NativeToolSchema } from "../providers/llm.js";
 import { stripThinkingTokens } from "../providers/llm.js";
 import type { ToolRegistry, ParsedToolCall } from "../tools/registry.js";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { setOverrides } from "../config/features.js";
 
 // ─── Model Control Token Sanitization ─────────────────────────────────────
 // Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)
@@ -561,6 +562,101 @@ function preflightContextCheck(
 }
 
 
+// ─── Micro-Compact: clear old tool results (learned from Claude Code) ─────
+// Unlike soft-trim which truncates, micro-compact completely replaces old tool
+// result content with a placeholder. The model still sees the tool_use →
+// tool_result structure (knows *what* it did) but not the raw output.
+
+const COMPACTABLE_TOOLS = new Set([
+    "read_file", "execute", "execute_command", "bash", "run_command",
+    "grep", "glob", "ls", "tree", "web_fetch", "web_search",
+    "search_files", "list_dir", "find_files",
+]);
+
+const MICRO_COMPACT_KEEP_RECENT = 3;
+
+export function microCompactToolResults(
+    messages: LLMMessage[],
+    keepRecent = MICRO_COMPACT_KEEP_RECENT,
+): LLMMessage[] {
+    // Check feature flag
+    try {
+        // Dynamic import not feasible in sync function — inline check
+        const envVal = process.env["CLAW_FEATURE_MICRO_COMPACT"] ?? "1";
+        if (!["1", "true", "yes", "on"].includes(envVal.toLowerCase())) return messages;
+    } catch { /* proceed with default on */ }
+
+    // Collect compactable tool call IDs in order
+    const compactableIds: string[] = [];
+    const compactableTextIndices: number[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]!;
+        if (msg.role === "assistant") {
+            // Native tool calls
+            if (msg.toolCallsMeta) {
+                for (const tc of msg.toolCallsMeta) {
+                    if (COMPACTABLE_TOOLS.has(tc.name)) {
+                        compactableIds.push(tc.id);
+                    }
+                }
+            }
+            // Text-based tool calls
+            else if (typeof msg.content === "string") {
+                try {
+                    const parsed = JSON.parse(msg.content);
+                    if (typeof parsed === "object" && parsed !== null) {
+                        if (!Array.isArray(parsed) && COMPACTABLE_TOOLS.has(parsed.tool)) {
+                            compactableTextIndices.push(i);
+                        } else if (Array.isArray(parsed)) {
+                            if (parsed.some((item: any) => COMPACTABLE_TOOLS.has(item?.tool))) {
+                                compactableTextIndices.push(i);
+                            }
+                        }
+                    }
+                } catch { /* not JSON */ }
+            }
+        }
+    }
+
+    // Keep the most recent N compactable tool results
+    const keepIds = new Set(compactableIds.slice(-keepRecent));
+    const keepTextIndices = new Set(compactableTextIndices.slice(-keepRecent));
+
+    // Clear old compactable tool results
+    const result: LLMMessage[] = [];
+    for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]!;
+
+        // Native tool results
+        if (msg.role === "tool" && msg.toolCallId) {
+            if (compactableIds.includes(msg.toolCallId) && !keepIds.has(msg.toolCallId)) {
+                result.push({
+                    role: "tool",
+                    content: "[Old tool result cleared to save context]",
+                    toolCallId: msg.toolCallId,
+                });
+                continue;
+            }
+        }
+        // Text-based tool results
+        else if (msg.role === "user" && typeof msg.content === "string" && msg.content.startsWith("[Tool Result]")) {
+            if (i > 0 && compactableTextIndices.includes(i - 1) && !keepTextIndices.has(i - 1)) {
+                result.push({
+                    role: "user",
+                    content: "[Tool Result] [Old tool result cleared to save context]",
+                });
+                continue;
+            }
+        }
+
+        result.push(msg);
+    }
+
+    return result;
+}
+
+
 // ─── Soft-Trim: prune stale/low-value content before compaction ───────────
 
 const SOFT_TRIM_RATIO = 0.60;
@@ -857,6 +953,35 @@ function offloadHistory(messages: LLMMessage[]): string | null {
     }
 }
 
+// ─── Write-Ahead Log (learned from Claude Code) ──────────────────────────
+// Persist the latest message before each LLM API call so that if the process
+// crashes mid-call, the user's last message isn't lost.
+
+export function walWrite(messages: LLMMessage[]): void {
+    try {
+        const envVal = process.env["CLAW_FEATURE_WAL"] ?? "0";
+        if (!["1", "true", "yes", "on"].includes(envVal.toLowerCase())) return;
+    } catch { return; }
+
+    try {
+        const walPath = resolve(process.cwd(), ".clawagents", "wal.jsonl");
+        mkdirSync(resolve(process.cwd(), ".clawagents"), { recursive: true });
+        const lastMsg = messages[messages.length - 1];
+        if (!lastMsg) return;
+        const content = typeof lastMsg.content === "string" ? lastMsg.content : String(lastMsg.content);
+        const entry = JSON.stringify({
+            role: lastMsg.role,
+            content: content.slice(0, 500),
+            ts: Date.now() / 1000,
+            msgCount: messages.length,
+        });
+        appendFileSync(walPath, entry + "\n", "utf-8");
+    } catch {
+        // WAL failure should never block the agent loop
+    }
+}
+
+
 // ─── Truncated JSON Detection ─────────────────────────────────────────────
 
 const TRUNCATED_JSON_RE = /\{\s*"tool"\s*:/;
@@ -903,7 +1028,12 @@ export async function runAgentGraph(
     previewChars = 120,
     responseChars = 500,
     timeoutS = 0,
+    features?: Record<string, boolean>,
 ): Promise<AgentState> {
+    if (features) {
+        setOverrides(features);
+    }
+
     const registry = tools;
     let nativeSchemas: NativeToolSchema[] | undefined =
         useNativeTools && registry ? registry.toNativeSchemas() : undefined;
@@ -1005,8 +1135,12 @@ export async function runAgentGraph(
                 break;
             }
 
+            // Write-ahead log: persist last message before API call (Claude Code pattern)
+            walWrite(messages);
+
             // Patch dangling tool calls before sending to LLM
             messages = patchDanglingToolCalls(messages);
+            messages = microCompactToolResults(messages);  // Claude Code pattern: clear old tool results
             messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
             messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
 
