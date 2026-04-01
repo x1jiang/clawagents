@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.27.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.27.1**
 
 ## Installation
 
@@ -491,6 +491,9 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_FEATURE_COORDINATOR` | `0` | No | Enable the `run_coordinator` swarm routing orchestration mode |
 
 ## Changelog
+
+### v5.27.1 — Timeout Bugfix
+- **Added timeoutS override** — Updated `ClawAgent.invoke` to correctly receive and pass through a per-invocation `timeoutS` parameter, matching the Python SDK convention.
 
 ### v5.27.0 — Claude Code Architectural Patterns
 

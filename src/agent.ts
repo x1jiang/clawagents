@@ -145,7 +145,13 @@ export class ClawAgent {
      * @param onEvent - (Optional) runtime stream callback to track the status changes
      * @param features - (Optional) dictionary matching process.env CLAW_FEATURE flags to override
      */
-    async invoke(task: string, maxIterations?: number, onEvent?: OnEvent, features?: Record<string, boolean>): Promise<AgentState> {
+    async invoke(
+        task: string,
+        maxIterations?: number,
+        onEvent?: OnEvent,
+        timeoutS?: number,
+        features?: Record<string, boolean>
+    ): Promise<AgentState> {
         return await runAgentGraph(
             task,
             this.llm,
@@ -164,7 +170,7 @@ export class ClawAgent {
             this.learn,
             this.previewChars,
             this.responseChars,
-            this.timeoutS,
+            timeoutS ?? this.timeoutS,
             features ?? this.features,
         );
     }
