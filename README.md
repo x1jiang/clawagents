@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.27.2**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.27.3**
 
 ## Installation
 
@@ -491,6 +491,10 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_FEATURE_COORDINATOR` | `0` | No | Enable the `run_coordinator` swarm routing orchestration mode |
 
 ## Changelog
+
+### v5.27.3 — Gemini Signature Regression Coverage
+- **Gemini signature regression test** — Added a provider-level test ensuring `thought_signature` propagation across sibling parallel `functionCall` parts.
+- **Release verification update** — Added release coverage for Gemini signature behavior and malformed function-call retry paths.
 
 ### v5.27.2 — Gemini 3 Thought Signature Fix
 - **Gemini 3 Propagation** — Propagated `thoughtSignature` to all parallel `functionCall` parts, preventing `400 INVALID_ARGUMENT` errors.
