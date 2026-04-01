@@ -506,6 +506,21 @@ function serializeGeminiParts(parts: any[] | undefined): Array<Record<string, un
         }
         if (Object.keys(d).length) serialized.push(d);
     }
+
+    // Propagate thoughtSignature to all functionCall parts (Gemini 3 requirement)
+    if (serialized.length > 0) {
+        const firstSig = serialized.find((d) => d.thoughtSignature)?.thoughtSignature || 
+                         serialized.find((d) => d.thought_signature)?.thought_signature;
+        if (firstSig) {
+            for (const d of serialized) {
+                if (d.functionCall && !d.thoughtSignature && !d.thought_signature) {
+                    d.thoughtSignature = firstSig;
+                    d.thought_signature = firstSig;
+                }
+            }
+        }
+    }
+
     return serialized.length ? serialized : undefined;
 }
 
