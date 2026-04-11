@@ -512,7 +512,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
-### v6.0.0 — Production Hardening: 17 Improvements from 10 Reference Codebases
+### v6.0.0 — Production Hardening: 17 Improvements
 
 **High Priority**
 
