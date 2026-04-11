@@ -857,7 +857,24 @@ export class AnthropicProvider implements LLMProvider {
             max_tokens: this.maxTokens,
             messages: apiMessages,
         };
-        if (systemParts.length) kwargs.system = systemParts.join("\n");
+        if (systemParts.length) {
+            const joined = systemParts.join("\n");
+            // Feature: Cache boundary optimization
+            // Split on __CACHE_BOUNDARY__ marker to create static (cached) + dynamic blocks
+            if (joined.includes("__CACHE_BOUNDARY__")) {
+                const [staticPart, ...dynamicRest] = joined.split("__CACHE_BOUNDARY__");
+                const dynamicPart = dynamicRest.join("__CACHE_BOUNDARY__");
+                const blocks: Array<Record<string, unknown>> = [
+                    { type: "text", text: (staticPart ?? "").trim(), cache_control: { type: "ephemeral" } },
+                ];
+                if (dynamicPart.trim()) {
+                    blocks.push({ type: "text", text: dynamicPart.trim() });
+                }
+                kwargs.system = blocks;
+            } else {
+                kwargs.system = joined;
+            }
+        }
         if (this.temperature > 0) kwargs.temperature = this.temperature;
         if (options?.tools?.length) {
             kwargs.tools = options.tools.map((s) => ({
@@ -887,11 +904,15 @@ export class AnthropicProvider implements LLMProvider {
                     });
                 }
             }
+            const usage = resp.usage;
             return {
                 content: textParts.join(""),
                 model: this.model,
-                tokensUsed: (resp.usage?.input_tokens ?? 0) + (resp.usage?.output_tokens ?? 0),
+                tokensUsed: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
                 ...(toolCalls.length ? { toolCalls } : {}),
+                cacheCreationTokens: (usage as any)?.cache_creation_input_tokens ?? 0,
+                cacheReadTokens: (usage as any)?.cache_read_input_tokens ?? 0,
+                promptTokens: usage?.input_tokens ?? 0,
             };
         });
     }

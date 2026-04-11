@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.27.3**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.28.0**
 
 ## Installation
 
@@ -244,6 +244,8 @@ npx tsx src/index.ts --task "hello world"                    # 5. Run first task
 | `--task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result. |
 | `--trajectory [N]` | Inspect the last N run summaries (default: 1). Shows score, quality, failures, judge verdict. Requires `CLAW_TRAJECTORY=1`. |
 | `--port N` | Start the HTTP gateway server on port N (default: 3000). |
+| `--sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). |
+| `--resume [ID\|latest]` | Resume a saved session from JSONL. Defaults to `latest`. |
 | `--help` | Show all options with examples. |
 
 ---
@@ -490,7 +492,38 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_FEATURE_FORKED_AGENTS` | `0` | No | Enable the `run_forked_agent` sandboxed sub-agent API |
 | `CLAW_FEATURE_COORDINATOR` | `0` | No | Enable the `run_coordinator` swarm routing orchestration mode |
 
+**v5.28.0 Features** — inspired by [claw-code-main](https://github.com/anthropics/claw-code) (Rust reference)
+
+| Variable | Default | Required? | Description |
+|:---|:---|:---:|:---|
+| `CLAW_FEATURE_CACHE_BOUNDARY` | `1` | No | Split system prompt for Anthropic prompt caching. Static prefix cached, dynamic suffix fresh each turn. |
+| `CLAW_FEATURE_SESSION_PERSISTENCE` | `0` | No | Save sessions as append-only JSONL to `.clawagents/sessions/`. Enables `--sessions` and `--resume`. |
+| `CLAW_FEATURE_ERROR_TAXONOMY` | `1` | No | Classify errors into 7 discrete classes with recovery hints. |
+| `CLAW_FEATURE_EXTERNAL_HOOKS` | `0` | No | Run shell hooks before/after tool calls and LLM calls. Config via `.clawagents/hooks.json` or `CLAW_HOOK_*` env vars. |
+
+**External Hook Env Vars** (requires `CLAW_FEATURE_EXTERNAL_HOOKS=1`)
+
+| Variable | Description |
+|:---|:---|
+| `CLAW_HOOK_PRE_TOOL_USE` | Shell command before each tool. Can block or modify args. |
+| `CLAW_HOOK_POST_TOOL_USE` | Shell command after each tool. Can modify results. |
+| `CLAW_HOOK_PRE_LLM` | Shell command before each LLM call. Can inject messages. |
+| `CLAW_HOOK_POST_LLM` | Shell command after each LLM response. Fire-and-forget logging. |
+
 ## Changelog
+
+### v5.28.0 — Error Taxonomy, Prompt Caching, Session Persistence & External Hooks
+
+Four production-grade features ported from the [claw-code-main](https://github.com/anthropics/claw-code) Rust reference:
+
+| Feature | Description |
+|:---|:---|
+| **Prompt Cache Boundary** | `__CACHE_BOUNDARY__` marker in system prompt. Anthropic provider splits into static (cached) + dynamic blocks. ON by default. |
+| **Error Taxonomy & Recovery** | 7 discrete error classes with `retryable`, `recoveryHint`, `failoverModel`. Structured error events via `onEvent`. ON by default. |
+| **Session Persistence** | Append-only JSONL to `.clawagents/sessions/`. New CLI: `--sessions` and `--resume [ID|latest]`. Opt-in. |
+| **External Hook System** | Shell hooks before/after tools and LLM calls. `.clawagents/hooks.json` or `CLAW_HOOK_*` env vars. 10s timeout, fail-open. Opt-in. |
+
+Also: Anthropic cache token extraction, `AgentState.sessionFile`, new exports (`ErrorClass`, `classifyError`, `SessionWriter`, `SessionReader`, `ExternalHookRunner`, etc.), removed circular self-dependency in `package.json`.
 
 ### v5.27.3 — Gemini Signature Regression Coverage
 - **Gemini signature regression test** — Added a provider-level test ensuring `thought_signature` propagation across sibling parallel `functionCall` parts.

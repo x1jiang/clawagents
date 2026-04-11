@@ -58,6 +58,18 @@ export { attachWebSocket } from "./gateway/ws.js";
 export { detectChannels, startChannelRouter } from "./channels/auto.js";
 export type { DetectedChannel } from "./channels/auto.js";
 
+// Error Taxonomy
+export { ErrorClass, classifyError, getRecoveryRecipe, RECOVERY_RECIPES } from "./errors/taxonomy.js";
+export type { ErrorDescriptor, RecoveryRecipe } from "./errors/taxonomy.js";
+
+// External Hooks
+export { ExternalHookRunner, loadHooksConfig, runHook } from "./hooks/external.js";
+export type { HooksConfig } from "./hooks/external.js";
+
+// Session Persistence
+export { SessionWriter, SessionReader, listSessions } from "./session/persistence.js";
+export type { SessionInfo, SessionEvent } from "./session/persistence.js";
+
 // ─── Banner ──────────────────────────────────────────────────────────────
 
 function buildBanner(): string {
@@ -313,6 +325,54 @@ async function main() {
         process.exit(0);
     }
 
+    // --sessions
+    if (args.includes("--sessions")) {
+        const { listSessions } = await import("./session/persistence.js");
+        const sessions = listSessions(20);
+        if (sessions.length === 0) {
+            console.log("No saved sessions found.");
+            console.log("Enable session persistence: CLAW_FEATURE_SESSION_PERSISTENCE=1");
+        } else {
+            console.log(`${"Session ID".padEnd(35)} ${"Turns".padStart(5)}  ${"Status".padEnd(10)}  Task`);
+            console.log("-".repeat(90));
+            for (const s of sessions) {
+                console.log(`${s.sessionId.padEnd(35)} ${String(s.turnCount).padStart(5)}  ${s.status.padEnd(10)}  ${s.task.slice(0, 40)}`);
+            }
+        }
+        return;
+    }
+
+    // --resume [sessionId|latest]
+    const resumeIdx = args.indexOf("--resume");
+    if (resumeIdx !== -1) {
+        const { listSessions, SessionReader } = await import("./session/persistence.js");
+        let sessionId = resumeIdx + 1 < args.length && !args[resumeIdx + 1]!.startsWith("--")
+            ? args[resumeIdx + 1]!
+            : "latest";
+        let sessionPath: string;
+
+        if (sessionId === "latest") {
+            const sessions = listSessions(1);
+            if (sessions.length === 0) { console.error("No sessions found to resume."); process.exit(1); }
+            sessionId = sessions[0]!.sessionId;
+            sessionPath = sessions[0]!.path;
+        } else {
+            sessionPath = resolve(process.cwd(), ".clawagents", "sessions", `${sessionId}.jsonl`);
+            if (!existsSync(sessionPath)) { console.error(`Session file not found: ${sessionPath}`); process.exit(1); }
+        }
+
+        const reader = new SessionReader(sessionPath);
+        const task = reader.getTask();
+        process.stderr.write(`Resuming session ${sessionId} (${reader.events.length} events, task: ${task.slice(0, 60)})\n`);
+
+        const config = loadConfig();
+        const activeModel = getDefaultModel(config);
+        const agent = await createClawAgent({ model: activeModel, streaming: config.streaming });
+        const result = await agent.invoke(`[Resumed session] Continue from where you left off. Original task: ${task}`);
+        if (result.result) process.stdout.write(result.result + "\n");
+        return;
+    }
+
     // --verbose / -v and --quiet / -q
     const verbose = args.includes("--verbose") || args.includes("-v");
     const quiet = args.includes("--quiet") || args.includes("-q");
@@ -362,6 +422,8 @@ Usage:
   npx tsx src/index.ts --doctor                  Check configuration health
   npx tsx src/index.ts --trajectory [N]          Show last N run summaries (default: 1)
   npx tsx src/index.ts --prune-trajectories [N]  Delete trajectory files older than N days (default: 30)
+  npx tsx src/index.ts --sessions                 List saved sessions
+  npx tsx src/index.ts --resume [ID|latest]       Resume a saved session
   npx tsx src/index.ts --port 8080               Start gateway server on custom port
   npx tsx src/index.ts                           Start gateway server (port 3000)
 

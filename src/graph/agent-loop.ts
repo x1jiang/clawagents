@@ -169,6 +169,7 @@ export interface AgentState {
     maxIterations: number;
     toolCalls: number;
     trajectoryFile?: string;
+    sessionFile?: string;
 }
 
 // ─── Event System ─────────────────────────────────────────────────────────
@@ -1060,6 +1061,31 @@ export async function runAgentGraph(
         recorder = new TrajectoryRecorder(task, "", responseChars);
     }
 
+    // Feature: Session Persistence — save session as append-only JSONL
+    let sessionWriter: import("../session/persistence.js").SessionWriter | undefined;
+    {
+        const { isEnabled } = await import("../config/features.js");
+        if (isEnabled("session_persistence")) {
+            const { SessionWriter } = await import("../session/persistence.js");
+            sessionWriter = new SessionWriter();
+            emit("context", { message: `session: ${sessionWriter.sessionId} → ${sessionWriter.path}` });
+        }
+    }
+
+    // Feature: External Hooks — load shell hooks from .clawagents/hooks.json or env
+    let extHookRunner: import("../hooks/external.js").ExternalHookRunner | undefined;
+    {
+        const { isEnabled } = await import("../config/features.js");
+        if (isEnabled("external_hooks")) {
+            const { loadHooksConfig, ExternalHookRunner } = await import("../hooks/external.js");
+            const hooksCfg = loadHooksConfig();
+            if (hooksCfg) {
+                extHookRunner = new ExternalHookRunner(hooksCfg);
+                emit("context", { message: "external hooks: loaded" });
+            }
+        }
+    }
+
     let tokenMultiplier = 1.0;
     let resolvedModelName: string | undefined;
 
@@ -1075,10 +1101,18 @@ export async function runAgentGraph(
         }
     }
 
+    // Insert __CACHE_BOUNDARY__ between static (instructions + tools) and dynamic content.
+    // The Anthropic provider splits on this marker to enable prompt caching.
+    const systemContent = promptToUse + "\n\n" + toolDesc + "\n__CACHE_BOUNDARY__";
     let messages: LLMMessage[] = [
-        { role: "system", content: promptToUse + "\n\n" + toolDesc },
+        { role: "system", content: systemContent },
         { role: "user", content: task },
     ];
+
+    // Session: write initial state
+    if (sessionWriter) {
+        sessionWriter.writeSystemPrompt(systemContent);
+    }
 
     // Initialize tokenizer encoder for accurate token counting
     await initTokenizer(resolvedModelName);
@@ -1126,6 +1160,9 @@ export async function runAgentGraph(
                 break;
             }
 
+            // Session: mark turn start
+            if (sessionWriter) sessionWriter.writeTurnStarted(roundIdx);
+
             try {
                 checkTimeout();
             } catch (err) {
@@ -1144,6 +1181,19 @@ export async function runAgentGraph(
             messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
             messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
 
+            // External pre_llm hook (runs before programmatic hook)
+            if (extHookRunner) {
+                try {
+                    const lastRole = messages.length > 0 ? messages[messages.length - 1]!.role : "";
+                    const extraMsgs = await extHookRunner.preLLM(messages.length, lastRole);
+                    if (extraMsgs) {
+                        for (const em of extraMsgs) {
+                            messages.push({ role: em.role as "user" | "assistant", content: em.content });
+                        }
+                    }
+                } catch (hookErr) { emit("warn", { message: `external preLLM hook error: ${hookErr}` }); }
+            }
+
             if (beforeLLM) {
                 try {
                     const hooked = beforeLLM(messages);
@@ -1160,9 +1210,38 @@ export async function runAgentGraph(
                     : nativeSchemas ? { tools: nativeSchemas } : undefined;
                 response = await llm.chat(messages, chatOptions);
                 if (!resolvedModelName && response.model) resolvedModelName = response.model;
+
+                // Session: write usage
+                if (sessionWriter) {
+                    sessionWriter.writeUsage(
+                        response.tokensUsed,
+                        response.cacheReadTokens ?? 0,
+                        response.cacheCreationTokens ?? 0,
+                    );
+                }
+
+                // External post_llm hook (fire-and-forget)
+                if (extHookRunner) {
+                    try {
+                        await extHookRunner.postLLM(
+                            response.content.slice(0, 500),
+                            (response.toolCalls ?? []).length,
+                        );
+                    } catch { /* fire-and-forget */ }
+                }
             } catch (err) {
-                const errMsg = String(err);
-                if (errMsg.toLowerCase().includes("context") || errMsg.toLowerCase().includes("token")) {
+                // Feature: Error Taxonomy — classify and apply recovery recipe
+                const { classifyError, ErrorClass } = await import("../errors/taxonomy.js");
+                const descriptor = classifyError(err);
+                emit("error", {
+                    phase: "llm_call",
+                    message: String(err),
+                    errorClass: descriptor.errorClass,
+                    retryable: descriptor.retryable,
+                    recoveryHint: descriptor.recoveryHint,
+                });
+
+                if (descriptor.errorClass === ErrorClass.CONTEXT_WINDOW) {
                     overflowRetries++;
                     if (overflowRetries > MAX_OVERFLOW_RETRIES) {
                         emit("error", {
@@ -1170,7 +1249,7 @@ export async function runAgentGraph(
                             message: `context overflow persists after ${MAX_OVERFLOW_RETRIES} retries. Increase CONTEXT_WINDOW, reduce tools, or shorten your instruction.`,
                         });
                         state.status = "error";
-                        state.result = errMsg;
+                        state.result = String(err);
                         break;
                     }
                     const observedRatio = contextWindow / Math.max(estimateMessagesTokens(messages, 1.0), 1);
@@ -1180,9 +1259,9 @@ export async function runAgentGraph(
                     messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
                     continue;
                 }
-                emit("error", { phase: "llm_call", message: errMsg });
+
                 state.status = "error";
-                state.result = errMsg;
+                state.result = `[${descriptor.errorClass}] ${descriptor.recoveryHint}`;
                 break;
             }
 
@@ -1280,10 +1359,33 @@ export async function runAgentGraph(
                 continue;
             }
 
+            // Session: write assistant message with tool calls
+            if (sessionWriter) {
+                const tcMeta = nativeToolCallObjects.map((tc) => ({ id: tc.toolCallId, name: tc.toolName, args: tc.args }));
+                sessionWriter.writeAssistantMessage(
+                    response.content || "",
+                    tcMeta.length > 0 ? tcMeta : undefined,
+                    _thinkingContent,
+                );
+            }
+
             if (toolCalls.length === 1) {
-                const call = toolCalls[0]!;
+                let call = toolCalls[0]!;
                 const nativeTc = nativeToolCallObjects[0];
                 emit("tool_call", { name: call.toolName });
+
+                // External pre_tool_use hook
+                if (extHookRunner) {
+                    try {
+                        const { allowed, args: extArgs } = await extHookRunner.preToolUse(call.toolName, call.args);
+                        if (!allowed) {
+                            emit("tool_skipped", { name: call.toolName, reason: "blocked by external hook" });
+                            messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was blocked by external hook.` });
+                            continue;
+                        }
+                        call = { toolName: call.toolName, args: extArgs };
+                    } catch (hookErr) { emit("warn", { message: `external preToolUse hook error: ${hookErr}` }); }
+                }
 
                 if (beforeTool) {
                     let approved = false;
@@ -1301,6 +1403,23 @@ export async function runAgentGraph(
 
                 let toolResult = await registry!.executeTool(call.toolName, call.args);
                 state.toolCalls++;
+
+                // External post_tool_use hook
+                if (extHookRunner) {
+                    try {
+                        const extResult = await extHookRunner.postToolUse(
+                            call.toolName, call.args,
+                            { success: toolResult.success, output: String(toolResult.output).slice(0, 1000) },
+                        );
+                        if ("success" in extResult && "output" in extResult) {
+                            toolResult = {
+                                success: extResult.success as boolean,
+                                output: extResult.output as string,
+                                error: extResult.error as string | undefined,
+                            };
+                        }
+                    } catch (hookErr) { emit("warn", { message: `external postToolUse hook error: ${hookErr}` }); }
+                }
 
                 if (afterTool) {
                     try {
@@ -1330,6 +1449,17 @@ export async function runAgentGraph(
                     success: toolResult.success,
                     preview,
                 });
+
+                // Session: write tool result
+                if (sessionWriter) {
+                    sessionWriter.writeToolResult(
+                        nativeTc?.toolCallId ?? "",
+                        call.toolName,
+                        toolResult.success,
+                        String(toolResult.output).slice(0, 2000),
+                        !toolResult.success ? toolResult.error : undefined,
+                    );
+                }
 
                 // Record result hash for no-progress / circuit breaker detection
                 if (typeof toolOutput === "string") {
@@ -1613,6 +1743,12 @@ export async function runAgentGraph(
 
     const elapsed = (Date.now() - t0) / 1000;
     state.messages = messages;
+
+    // Session: write final turn_completed
+    if (sessionWriter) {
+        sessionWriter.writeTurnCompleted(state.iterations, state.toolCalls, state.status);
+        state.sessionFile = sessionWriter.path;
+    }
 
     // ── Finalize trajectory ──
     let runSummary: import("../trajectory/recorder.js").RunSummary | undefined;
