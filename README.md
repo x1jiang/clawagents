@@ -514,8 +514,6 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ### v6.0.0 — Production Hardening: 17 Improvements from 10 Reference Codebases
 
-Major release incorporating patterns from OpenClaw, DeepAgents, NanoClaw, Claw-Code, ToolUniverse, SkyRL, CUDA-Agent, and OpenClaw-RL. Full parity with the Python SDK.
-
 **High Priority**
 
 | Feature | Description |
