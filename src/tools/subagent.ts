@@ -11,6 +11,13 @@ import type { LLMProvider } from "../providers/llm.js";
 import type { Tool, ToolResult, ToolRegistry } from "./registry.js";
 import { enqueueCommandInLane } from "../process/command-queue.js";
 import { CommandLane } from "../process/lanes.js";
+import { isEnabled } from "../config/features.js";
+import * as os from "node:os";
+
+/** Keys that must NOT be inherited by child agents — prevents parent context leakage. */
+export const EXCLUDED_STATE_KEYS: ReadonlySet<string> = new Set([
+    "messages", "todos", "trajectory", "lessons", "session",
+]);
 
 /**
  * Specification for a named sub-agent with its own configuration.
@@ -28,6 +35,11 @@ export interface SubAgentSpec {
     maxIterations?: number;
     /** Whether to use native tool calling for this sub-agent. */
     useNativeTools?: boolean;
+    /**
+     * When true (and the credential_proxy feature flag is on), start a local
+     * credential proxy so the sub-agent never receives raw API keys.
+     */
+    credentialProxy?: boolean;
 }
 
 export class TaskTool implements Tool {
@@ -90,35 +102,76 @@ export class TaskTool implements Tool {
         const effectivePrompt = spec?.systemPrompt;
         const effectiveNativeTools = spec?.useNativeTools ?? true;
 
-        const doRun = async () => {
-            const state = await runAgentGraph(
-                description,
-                this.llm,
-                this.tools,
-                effectivePrompt,
-                effectiveMaxIter,
-                false,
-                128_000,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                effectiveNativeTools,
-            );
+        const useCredProxy = Boolean(spec?.credentialProxy && isEnabled("credential_proxy"));
 
-            if (state.status === "error") {
-                return {
-                    success: false,
-                    output: state.result || "",
-                    error: `Sub-agent failed: ${state.result}`,
-                } as ToolResult;
+        const doRun = async () => {
+            const { CredentialProxy } = await import("../sandbox/credential-proxy.js");
+            let proxy: InstanceType<typeof CredentialProxy> | null = null;
+            const oldEnv: Record<string, string | undefined> = {};
+
+            if (useCredProxy) {
+                const credHeaders: Record<string, string> = {};
+                const openaiKey = process.env["OPENAI_API_KEY"];
+                if (openaiKey) credHeaders["Authorization"] = `Bearer ${openaiKey}`;
+                const anthropicKey = process.env["ANTHROPIC_API_KEY"];
+                if (anthropicKey) credHeaders["x-api-key"] = anthropicKey;
+
+                if (Object.keys(credHeaders).length > 0) {
+                    proxy = new CredentialProxy(credHeaders);
+                    const proxyUrl = proxy.start();
+                    const overrides: Record<string, string> = {
+                        OPENAI_BASE_URL: proxyUrl,
+                        ANTHROPIC_BASE_URL: proxyUrl,
+                        OPENAI_API_KEY: "proxy",
+                        ANTHROPIC_API_KEY: "proxy",
+                    };
+                    for (const [k, v] of Object.entries(overrides)) {
+                        oldEnv[k] = process.env[k];
+                        process.env[k] = v;
+                    }
+                }
             }
 
-            const agentLabel = spec ? `Sub-agent [${spec.name}]` : "Sub-agent";
-            return {
-                success: true,
-                output: `[${agentLabel} completed: ${state.toolCalls} tool calls, ${state.iterations} iterations]\n\n${state.result}`,
-            } as ToolResult;
+            try {
+                const state = await runAgentGraph(
+                    description,
+                    this.llm,
+                    this.tools,
+                    effectivePrompt,
+                    effectiveMaxIter,
+                    false,
+                    128_000,
+                    undefined,
+                    undefined,
+                    undefined,
+                    undefined,
+                    effectiveNativeTools,
+                );
+
+                if (state.status === "error") {
+                    return {
+                        success: false,
+                        output: state.result || "",
+                        error: `Sub-agent failed: ${state.result}`,
+                    } as ToolResult;
+                }
+
+                const agentLabel = spec ? `Sub-agent [${spec.name}]` : "Sub-agent";
+                return {
+                    success: true,
+                    output: `[${agentLabel} completed: ${state.toolCalls} tool calls, ${state.iterations} iterations]\n\n${state.result}`,
+                } as ToolResult;
+            } finally {
+                // Restore original env vars and stop credential proxy
+                for (const [k, orig] of Object.entries(oldEnv)) {
+                    if (orig === undefined) {
+                        delete process.env[k];
+                    } else {
+                        process.env[k] = orig;
+                    }
+                }
+                if (proxy !== null) proxy.stop();
+            }
         };
 
         try {

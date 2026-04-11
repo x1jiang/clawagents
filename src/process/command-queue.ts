@@ -25,6 +25,9 @@ type QueueEntry = {
     enqueuedAt: number;
     warnAfterMs: number;
     onWait?: ((waitMs: number, queuedAhead: number) => void) | undefined;
+    /** When true, this entry waits for all active tasks to finish before running,
+     *  and blocks subsequent dispatch until it completes. */
+    isBarrier?: boolean;
 };
 
 type LaneState = {
@@ -73,7 +76,14 @@ function drainLane(lane: string) {
 
     const pump = () => {
         while (state.activeTaskIds.size < state.maxConcurrent && state.queue.length > 0) {
-            const entry = state.queue.shift() as QueueEntry;
+            const entry = state.queue[0] as QueueEntry;
+
+            // Barrier: wait until all active tasks finish before dispatching.
+            if (entry.isBarrier && state.activeTaskIds.size > 0) {
+                break;
+            }
+
+            state.queue.shift();
             const waitedMs = Date.now() - entry.enqueuedAt;
             if (waitedMs >= entry.warnAfterMs) {
                 entry.onWait?.(waitedMs, state.queue.length);
@@ -85,6 +95,7 @@ function drainLane(lane: string) {
             const taskId = nextTaskId++;
             const taskGeneration = state.generation;
             state.activeTaskIds.add(taskId);
+            const isBarrierEntry = entry.isBarrier ?? false;
             void (async () => {
                 const startTime = Date.now();
                 try {
@@ -111,6 +122,11 @@ function drainLane(lane: string) {
                     entry.reject(err);
                 }
             })();
+
+            // After dispatching a barrier, don't dispatch anything else until it finishes.
+            if (isBarrierEntry) {
+                break;
+            }
         }
         state.draining = false;
     };
@@ -158,6 +174,40 @@ export function enqueueCommand<T>(
     },
 ): Promise<T> {
     return enqueueCommandInLane(CommandLane.Main, task, opts);
+}
+
+/**
+ * Enqueue a barrier task in a lane.
+ *
+ * The barrier waits until all currently active tasks in the lane finish,
+ * then runs exclusively, blocking subsequent dispatch until it completes.
+ *
+ * Useful for checkpointing, flushing, or sequencing critical sections.
+ */
+export function enqueueBarrier<T>(
+    lane: string,
+    task: () => Promise<T>,
+    opts?: {
+        warnAfterMs?: number;
+        onWait?: (waitMs: number, queuedAhead: number) => void;
+    },
+): Promise<T> {
+    const cleaned = lane.trim() || CommandLane.Main;
+    const warnAfterMs = opts?.warnAfterMs ?? 2_000;
+    const state = getLaneState(cleaned);
+    return new Promise<T>((resolve, reject) => {
+        state.queue.push({
+            task: () => task(),
+            resolve: (value) => resolve(value as T),
+            reject,
+            enqueuedAt: Date.now(),
+            warnAfterMs,
+            onWait: opts?.onWait,
+            isBarrier: true,
+        });
+        logLaneEnqueue(cleaned, state.queue.length + state.activeTaskIds.size);
+        drainLane(cleaned);
+    });
 }
 
 export function getQueueSize(lane: string = CommandLane.Main) {

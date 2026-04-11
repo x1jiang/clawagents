@@ -8,7 +8,8 @@
  * Inspired by claw-code-main's session.rs.
  */
 
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { atomicWriteFileSync } from "../utils/atomic-write.js";
 import { resolve, basename } from "node:path";
 import type { LLMMessage } from "../providers/llm.js";
 

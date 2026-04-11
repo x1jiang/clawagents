@@ -43,12 +43,20 @@ function sanitizeAssistantText(text: string): string {
 function patchDanglingToolCalls(messages: LLMMessage[]): LLMMessage[] {
     if (messages.length === 0) return messages;
 
+    // Build set of all toolCallId values that have a matching role="tool" response
+    const respondedIds = new Set<string>();
+    for (const msg of messages) {
+        if (msg.role === "tool" && msg.toolCallId) {
+            respondedIds.add(msg.toolCallId);
+        }
+    }
+
     const patched: LLMMessage[] = [];
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i]!;
         patched.push(msg);
 
-        // Look for assistant messages that contain JSON tool calls without a following [Tool Result]
+        // Text-mode: look for assistant messages with JSON tool calls without a following [Tool Result]
         if (msg.role === "assistant" && typeof msg.content === "string" && msg.content.startsWith('{"tool":')) {
             const hasResult = i + 1 < messages.length &&
                 messages[i + 1]!.role === "user" &&
@@ -59,6 +67,20 @@ function patchDanglingToolCalls(messages: LLMMessage[]): LLMMessage[] {
                     role: "user",
                     content: "[Tool Result] Tool call was cancelled — the agent was interrupted before it could complete.",
                 });
+            }
+        }
+
+        // Native tool calls: inject synthetic role="tool" for any missing responses
+        else if (msg.role === "assistant" && msg.toolCallsMeta) {
+            for (const tc of msg.toolCallsMeta) {
+                if (tc.id && !respondedIds.has(tc.id)) {
+                    patched.push({
+                        role: "tool",
+                        content: "Tool call was cancelled — the agent was interrupted before it could complete.",
+                        toolCallId: tc.id,
+                    });
+                    respondedIds.add(tc.id);
+                }
             }
         }
     }
@@ -191,7 +213,25 @@ export type OnEvent = (kind: EventKind, data: Record<string, unknown>) => void;
 // ─── Hook Types ───────────────────────────────────────────────────────────
 
 export type BeforeLLMHook = (messages: LLMMessage[]) => LLMMessage[];
-export type BeforeToolHook = (toolName: string, args: Record<string, unknown>) => boolean;
+
+/**
+ * Rich result from a BeforeToolHook.
+ *
+ * Allows hooks to deny execution with a reason, rewrite tool arguments,
+ * or inject messages into the conversation — instead of a bare boolean.
+ */
+export interface HookResult {
+    allowed: boolean;
+    reason?: string;
+    updatedArgs?: Record<string, unknown>;
+    messages?: LLMMessage[];
+}
+
+/**
+ * BeforeToolHook is backward-compatible: old hooks returning boolean still work.
+ * New hooks may return a HookResult for richer control.
+ */
+export type BeforeToolHook = (toolName: string, args: Record<string, unknown>) => boolean | HookResult;
 export type AfterToolHook = (toolName: string, args: Record<string, unknown>, result: import("../tools/registry.js").ToolResult) => import("../tools/registry.js").ToolResult;
 
 function defaultOnEvent(kind: EventKind, data: Record<string, unknown>): void {
@@ -660,7 +700,7 @@ export function microCompactToolResults(
 
 // ─── Soft-Trim: prune stale/low-value content before compaction ───────────
 
-const SOFT_TRIM_RATIO = 0.60;
+const SOFT_TRIM_BUDGET_FRACTION = 0.75; // soft-trim at 75% of the compaction budgetRatio
 const SOFT_TRIM_RESULT_MAX_CHARS = 1000;
 const SOFT_TRIM_RESULT_KEEP_CHARS = 500;
 const SOFT_TRIM_RECENT_PROTECTED = 10;
@@ -672,10 +712,10 @@ function softTrimMessages(
     emit: OnEvent,
     modelName?: string,
 ): LLMMessage[] {
-    const { window: effectiveWindow } = modelName
+    const { window: effectiveWindow, ratio: budgetRatio } = modelName
         ? resolveContextBudget(modelName, contextWindow)
-        : { window: contextWindow };
-    const softBudget = Math.floor(effectiveWindow * SOFT_TRIM_RATIO);
+        : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
+    const softBudget = Math.floor(effectiveWindow * budgetRatio * SOFT_TRIM_BUDGET_FRACTION);
     const currentTokens = estimateMessagesTokens(messages, tokenMultiplier);
 
     if (currentTokens <= softBudget) return messages;
@@ -854,17 +894,19 @@ async function compactIfNeeded(
     const older = nonSystem.slice(0, splitIdx);
     const recent = nonSystem.slice(splitIdx);
 
-    const offloadPath = offloadHistory(older);
-    if (offloadPath) {
-        emit("context", { message: `offloaded ${older.length} messages to ${offloadPath}` });
-    }
-
     let taskContext = "";
     for (const m of nonSystem) {
         if (m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[Tool Result]")) {
             taskContext = m.content.slice(0, 500);
             break;
         }
+    }
+
+    archivePreCompactTranscript(older, taskContext);
+
+    const offloadPath = offloadHistory(older);
+    if (offloadPath) {
+        emit("context", { message: `offloaded ${older.length} messages to ${offloadPath}` });
     }
 
     const textParts: string[] = [];
@@ -931,6 +973,33 @@ async function compactIfNeeded(
     } catch {
         emit("context", { message: "compaction failed — dropping oldest messages" });
         return [...systemMessages, ...recent];
+    }
+}
+
+// ─── Pre-Compact Transcript Archival ─────────────────────────────────────
+
+function archivePreCompactTranscript(olderMessages: LLMMessage[], taskContext: string): void {
+    const envVal = process.env["CLAW_FEATURE_TRANSCRIPT_ARCHIVAL"] ?? "0";
+    if (!["1", "true", "yes", "on"].includes(envVal.toLowerCase())) return;
+
+    try {
+        const transcriptDir = resolve(process.cwd(), ".clawagents", "transcripts");
+        mkdirSync(transcriptDir, { recursive: true });
+        const ts = Math.floor(Date.now() / 1000);
+        const path = resolve(transcriptDir, `pre_compact_${ts}_${olderMessages.length}msgs.md`);
+
+        const lines: string[] = [
+            "## Pre-Compact Transcript\n",
+            `\nTask: ${taskContext}\n`,
+            "\n### Messages\n\n",
+        ];
+        for (const m of olderMessages) {
+            const content = typeof m.content === "string" ? m.content : String(m.content);
+            lines.push(`**${m.role}**: ${content.slice(0, 2000)}\n\n`);
+        }
+        writeFileSync(path, lines.join(""), "utf-8");
+    } catch {
+        // Archival failure should never block compaction
     }
 }
 
@@ -1388,13 +1457,25 @@ export async function runAgentGraph(
                 }
 
                 if (beforeTool) {
-                    let approved = false;
-                    try { approved = !!beforeTool(call.toolName, call.args); }
-                    catch (hookErr) { emit("warn", { message: `beforeTool hook error: ${hookErr}` }); }
+                    let approved = true;
+                    let hookReason = "rejected by before_tool hook";
+                    try {
+                        const hookRaw = beforeTool(call.toolName, call.args);
+                        if (hookRaw !== null && typeof hookRaw === "object") {
+                            approved = hookRaw.allowed;
+                            if (hookRaw.reason) hookReason = hookRaw.reason;
+                            if (hookRaw.allowed && hookRaw.updatedArgs !== undefined) {
+                                call = { toolName: call.toolName, args: hookRaw.updatedArgs };
+                            }
+                            if (hookRaw.messages) messages.push(...hookRaw.messages);
+                        } else {
+                            approved = !!hookRaw;
+                        }
+                    } catch (hookErr) { emit("warn", { message: `beforeTool hook error: ${hookErr}` }); }
                     if (!approved) {
-                        emit("tool_skipped", { name: call.toolName });
+                        emit("tool_skipped", { name: call.toolName, reason: hookReason });
                         messages.push({ role: "assistant", content: `{"tool": "${call.toolName}", "args": ${JSON.stringify(call.args)}}` });
-                        messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was not approved.` });
+                        messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was not approved. Reason: ${hookReason}` });
                         continue;
                     }
                 }
@@ -1549,14 +1630,26 @@ export async function runAgentGraph(
             } else {
                 let approvedCalls = toolCalls;
                 if (beforeTool) {
-                    approvedCalls = toolCalls.filter((call) => {
-                        let approved = false;
-                        try { approved = !!beforeTool(call.toolName, call.args); }
-                        catch (hookErr) { emit("warn", { message: `beforeTool hook error: ${hookErr}` }); }
+                    const remapped: import("../tools/registry.js").ParsedToolCall[] = [];
+                    for (const call of toolCalls) {
+                        let approved = true;
+                        let remappedCall = call;
+                        try {
+                            const hookRaw = beforeTool(call.toolName, call.args);
+                            if (hookRaw !== null && typeof hookRaw === "object") {
+                                approved = hookRaw.allowed;
+                                if (hookRaw.allowed && hookRaw.updatedArgs !== undefined) {
+                                    remappedCall = { toolName: call.toolName, args: hookRaw.updatedArgs };
+                                }
+                                if (hookRaw.messages) messages.push(...hookRaw.messages);
+                            } else {
+                                approved = !!hookRaw;
+                            }
+                        } catch (hookErr) { emit("warn", { message: `beforeTool hook error: ${hookErr}` }); }
                         if (!approved) emit("tool_skipped", { name: call.toolName });
-                        else emit("tool_call", { name: call.toolName });
-                        return approved;
-                    });
+                        else { emit("tool_call", { name: call.toolName }); remapped.push(remappedCall); }
+                    }
+                    approvedCalls = remapped;
                 } else {
                     for (const call of toolCalls) {
                         emit("tool_call", { name: call.toolName });

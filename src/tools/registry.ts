@@ -92,6 +92,38 @@ export function snapshotBeforeWrite(toolName: string, args: Record<string, unkno
     }
 }
 
+// ─── Lazy Tool ────────────────────────────────────────────────────────────────
+
+/**
+ * Deferred tool — the backing module is imported only on first execute().
+ * Useful for reducing startup latency when many tools are registered but
+ * only a subset are used in any given run.
+ */
+export class LazyTool implements Tool {
+    private _resolved: Tool | null = null;
+
+    constructor(
+        public readonly name: string,
+        public readonly description: string,
+        public readonly parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>,
+        private readonly modulePath: string,
+        private readonly className: string,
+    ) {}
+
+    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+        if (!this._resolved) {
+            // Dynamic import using the module path (relative or absolute)
+            const mod = await import(this.modulePath);
+            const Cls = mod[this.className];
+            if (typeof Cls !== "function") {
+                throw new Error(`LazyTool: class '${this.className}' not found in module '${this.modulePath}'`);
+            }
+            this._resolved = new Cls() as Tool;
+        }
+        return this._resolved.execute(args);
+    }
+}
+
 // ─── Tool Registry ─────────────────────────────────────────────────────────
 
 export class ToolRegistry {
@@ -120,6 +152,22 @@ export class ToolRegistry {
 
     register(tool: Tool): void {
         this.tools.set(tool.name, tool);
+        this._descriptionCache = null;
+    }
+
+    /**
+     * Register a tool that will be imported only when first executed.
+     * The backing module is loaded lazily on the first call to execute().
+     */
+    registerLazy(
+        name: string,
+        description: string,
+        parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>,
+        modulePath: string,
+        className: string,
+    ): void {
+        const lazy = new LazyTool(name, description, parameters, modulePath, className);
+        this.tools.set(name, lazy);
         this._descriptionCache = null;
     }
 

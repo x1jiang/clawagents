@@ -25,6 +25,14 @@ export interface Skill {
         bins?: string[];
         env?: string[];
     };
+    /** Actions the skill explicitly forbids (from YAML `forbidden-actions` field). */
+    forbiddenActions?: string[];
+    /** Expected workspace layout description (from YAML `workspace-layout` field). */
+    workspaceLayout?: string;
+    /** Success criteria description (from YAML `success-criteria` field). */
+    successCriteria?: string;
+    /** Ordered workflow steps (from YAML `workflow-steps` field). */
+    workflowSteps?: string[];
 }
 
 /**
@@ -77,7 +85,34 @@ function parseSkillFile(content: string, filePath: string): Skill {
         }
     }
 
-    return { name, description, content: body.trim(), path: filePath, allowedTools, requires };
+    let forbiddenActions: string[] = [];
+    let workspaceLayout = "";
+    let successCriteria = "";
+    let workflowSteps: string[] = [];
+
+    if (frontmatterMatch) {
+        const yaml = frontmatterMatch[1] ?? "";
+        const parseList = (raw: string): string[] =>
+            raw.replace(/[\[\]"']/g, "").split(/[\s,]+/).filter(Boolean);
+
+        const forbiddenMatch = yaml.match(/^forbidden-actions:\s*(.+)$/m);
+        if (forbiddenMatch) forbiddenActions = parseList(forbiddenMatch[1]!);
+
+        const layoutMatch = yaml.match(/^workspace-layout:\s*"?([^"]+)"?$/m);
+        if (layoutMatch) workspaceLayout = layoutMatch[1]!.trim();
+
+        const criteriaMatch = yaml.match(/^success-criteria:\s*"?([^"]+)"?$/m);
+        if (criteriaMatch) successCriteria = criteriaMatch[1]!.trim();
+
+        const stepsMatch = yaml.match(/^workflow-steps:\s*(.+)$/m);
+        if (stepsMatch) workflowSteps = parseList(stepsMatch[1]!);
+    }
+
+    return {
+        name, description, content: body.trim(), path: filePath,
+        allowedTools, requires,
+        forbiddenActions, workspaceLayout, successCriteria, workflowSteps,
+    };
 }
 
 function isSkillEligible(skill: Skill): boolean {
@@ -197,9 +232,34 @@ export function createSkillTools(store: SkillStore): Tool[] {
                     error: `Skill "${name}" not found. Available: ${available || "none"}`,
                 };
             }
+            const parts: string[] = [`# Skill: ${skill.name}`];
+
+            if (skill.forbiddenActions && skill.forbiddenActions.length > 0) {
+                parts.push("\n## Forbidden Actions");
+                for (const action of skill.forbiddenActions) {
+                    parts.push(`- ${action}`);
+                }
+            }
+
+            if (skill.workspaceLayout) {
+                parts.push("\n## Workspace Layout");
+                parts.push(skill.workspaceLayout);
+            }
+
+            if (skill.successCriteria) {
+                parts.push("\n## Success Criteria");
+                parts.push(skill.successCriteria);
+            }
+
+            if (skill.workflowSteps && skill.workflowSteps.length > 0) {
+                parts.push("\n## Workflow Steps");
+                skill.workflowSteps.forEach((step, i) => parts.push(`${i + 1}. ${step}`));
+            }
+
+            parts.push(`\n${skill.content}`);
             return {
                 success: true,
-                output: `# Skill: ${skill.name}\n\n${skill.content}`,
+                output: parts.join("\n"),
             };
         },
     };

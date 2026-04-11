@@ -14,6 +14,7 @@
  */
 
 import { mkdirSync, appendFileSync, existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { atomicWriteFileSync } from "../utils/atomic-write.js";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -360,12 +361,11 @@ export class TrajectoryRecorder {
             appendFileSync(runsFile, JSON.stringify(summary) + "\n", "utf-8");
         } catch { /* best effort */ }
 
-        // Feature E: export RFT-ready transitions
+        // Feature E: export RFT-ready transitions (atomic write)
         try {
-            const { writeFileSync } = require("node:fs");
             const rftFile = resolve(getTrajectoriesDir(), `${this.runId}_rft.json`);
             const transitions = this.exportRftTransitions();
-            writeFileSync(rftFile, JSON.stringify({
+            atomicWriteFileSync(rftFile, JSON.stringify({
                 runId: this.runId,
                 task: this.task,
                 model: this.model,

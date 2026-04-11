@@ -290,6 +290,7 @@ export async function createClawAgent({
     responseChars,
     timeoutS,
     features,
+    fallbackModels,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
@@ -314,6 +315,8 @@ export async function createClawAgent({
     responseChars?: number;
     timeoutS?: number;
     features?: Record<string, boolean>;
+    /** Optional fallback LLM providers. When the primary provider fails, these are tried in order. */
+    fallbackModels?: LLMProvider[];
 } = {}): Promise<ClawAgent> {
     // ── Resolve opt-in flags ─────────────────────────────────────────
     const envTrue = (key: string) => ["1", "true", "yes"].includes(
@@ -334,7 +337,11 @@ export async function createClawAgent({
     const resolvedTimeoutS = timeoutS ?? envInt("CLAW_TIMEOUT", 0);
 
     // ── Resolve model → LLMProvider ──────────────────────────────────
-    const llm = await resolveModel(model, streaming, apiKey, contextWindow, maxTokens, temperature, baseUrl, apiVersion);
+    let llm: LLMProvider = await resolveModel(model, streaming, apiKey, contextWindow, maxTokens, temperature, baseUrl, apiVersion);
+    if (fallbackModels && fallbackModels.length > 0) {
+        const { FallbackProvider } = await import("./providers/fallback.js");
+        llm = new FallbackProvider(llm, fallbackModels);
+    }
 
     // ── Resolve sandbox backend ──────────────────────────────────────
     const sb = sandbox ?? new LocalBackend();

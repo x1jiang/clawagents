@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v5.28.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.0.0**
 
 ## Installation
 
@@ -511,6 +511,39 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_HOOK_POST_LLM` | Shell command after each LLM response. Fire-and-forget logging. |
 
 ## Changelog
+
+### v6.0.0 — Production Hardening: 17 Improvements from 10 Reference Codebases
+
+Major release incorporating patterns from OpenClaw, DeepAgents, NanoClaw, Claw-Code, ToolUniverse, SkyRL, CUDA-Agent, and OpenClaw-RL. Full parity with the Python SDK.
+
+**High Priority**
+
+| Feature | Description |
+|:---|:---|
+| **Native Tool Call Patching (H1)** | `patchDanglingToolCalls` now handles native function calling (`toolCallsMeta`), not just text-mode JSON. Injects synthetic cancelled responses for orphaned tool call IDs. |
+| **Three-Tier Provider Fallback (H2)** | New `FallbackProvider` wraps any LLM with `primary → named fallback → global fallback` chain. Quarantines providers after consecutive failures. Config via `fallbackModels` param or `CLAWAGENTS_FALLBACK_MODELS` env var. |
+| **Credential Proxy (H3)** | New `CredentialProxy` — local HTTP proxy injects API keys into outbound requests so sandboxed sub-agents never see raw credentials. Opt-in via `CLAW_FEATURE_CREDENTIAL_PROXY=1`. |
+| **Rich Hook Result Model (H4)** | `BeforeToolHook` now accepts `HookResult` return (backward-compatible with `boolean`). Hooks can block with reason, redirect args, inject messages. `HookResult` interface exported from public API. |
+| **Fraction-Based Summarization (H5)** | Soft-trim threshold derives from per-model `budgetRatio` instead of hardcoded 0.60. Auto-adapts to any model's context window. |
+| **Lazy Static Tool Registry (H7)** | New `LazyTool` class + `ToolRegistry.registerLazy()`. Tools imported only on first `execute()` call. |
+
+**Medium Priority**
+
+| Feature | Description |
+|:---|:---|
+| **Subagent State Isolation (M1)** | `EXCLUDED_STATE_KEYS` prevents parent state from leaking into child sub-agents. |
+| **SKILL.md Constraint Documents (M4)** | Skills now support `forbiddenActions`, `workspaceLayout`, `successCriteria`, `workflowSteps` in YAML frontmatter. |
+| **Pre-Compact Transcript Archival (M5)** | Full transcript archived to `.clawagents/transcripts/` before context compaction. Opt-in via `CLAW_FEATURE_TRANSCRIPT_ARCHIVAL=1`. |
+| **Atomic File Writes (M7)** | Trajectory recorder and session persistence use temp-then-rename via `atomicWriteFileSync()`. Prevents corruption on crash. |
+| **Barrier-Based Scheduling (M8)** | Command queue supports barrier entries. Destructive ops wait for active tasks to complete. |
+| **Session Heartbeat (M9)** | New `SessionHeartbeat` class auto-releases stale sessions after timeout. |
+| **Cross-Provider Test Suite (M10)** | 22 conformance tests ensuring `LocalBackend` and `InMemoryBackend` satisfy the `SandboxBackend` interface. |
+
+**New files:** `providers/fallback.ts`, `sandbox/credential-proxy.ts`, `utils/atomic-write.ts`, `session/heartbeat.ts`, `cross_provider.test.ts`
+
+**New feature flags:** `transcript_archival` (off), `credential_proxy` (off)
+
+**New exports:** `HookResult`, `FallbackProvider`, `CredentialProxy`, `SessionHeartbeat`, `LazyTool`, `atomicWriteFileSync`
 
 ### v5.28.0 — Error Taxonomy, Prompt Caching, Session Persistence & External Hooks
 

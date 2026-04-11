@@ -18,7 +18,7 @@ import { detectChannels } from "./channels/auto.js";
 
 // Re-export public API
 export { createClawAgent, ClawAgent, LangChainToolAdapter } from "./agent.js";
-export type { AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook } from "./graph/agent-loop.js";
+export type { AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult } from "./graph/agent-loop.js";
 export type { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
 export { ResultCacheManager } from "./tools/cache.js";
 export { validateToolArgs, formatValidationErrors } from "./tools/validate.js";

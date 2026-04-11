@@ -32,8 +32,10 @@ const FEATURE_DEFAULTS: Record<string, string> = {
     external_hooks:       "0",   // External shell hook system
 
     // Complex — opt-in
+    credential_proxy:     "0",   // Credential proxy for sub-agent sandbox isolation
     forked_agents:        "0",   // Background forked agent pattern
     coordinator:          "0",   // Coordinator/swarm orchestration mode
+    transcript_archival:  "0",   // Archive full messages to markdown before compaction
 };
 
 const ENV_PREFIX = "CLAW_FEATURE_";
