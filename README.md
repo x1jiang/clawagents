@@ -540,6 +540,14 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.1.1 — Credential Isolation & Lazy Tool Provisioning
+
+| Feature | Description |
+|:---|:---|
+| **Credential Isolation** | `execute` tool strips sensitive env vars (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) from subprocess environment. Claude-generated code can no longer read API keys via `env` or `process.env`. |
+| **Lazy Tool Provisioning** | Sandbox-backed tools (filesystem, exec, advanced-fs, web) defer module import to first `execute()` call. Schema is available immediately for the LLM. Reduces startup overhead. |
+| **LazyFactoryTool** | New `LazyFactoryTool` class in registry — wraps a factory function that creates the real tool on first use. |
+
 ### v6.1.0 — Advisor Model: Smart Model Guides Cheap Model
 
 Pair a stronger "advisor" model with a cheaper "executor" model. The executor runs every turn; the advisor is consulted 2-3 times per task for strategic guidance. Cross-provider supported — any model can advise any other model.

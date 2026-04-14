@@ -122,6 +122,28 @@ export class LocalBackend implements SandboxBackend {
         };
     }
 
+    // ── Credential isolation ────────────────────────────────────────
+    // Keys stripped from subprocess env to prevent credential leakage.
+    // Claude-generated code running in execute() should never see API keys.
+    private static readonly SENSITIVE_ENV_KEYS = new Set([
+        "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+        "ADVISOR_API_KEY", "ADVISOR_MODEL",
+        "GATEWAY_API_KEY", "TAVILY_API_KEY",
+        "TELEGRAM_BOT_TOKEN", "WHATSAPP_API_TOKEN",
+        "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+        "AZURE_API_KEY", "GOOGLE_API_KEY",
+    ]);
+
+    private sanitizedEnv(): Record<string, string> {
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+            if (v !== undefined && !LocalBackend.SENSITIVE_ENV_KEYS.has(k)) {
+                env[k] = v;
+            }
+        }
+        return env;
+    }
+
     // ── Command execution ───────────────────────────────────────────
 
     async exec(
@@ -130,9 +152,10 @@ export class LocalBackend implements SandboxBackend {
     ): Promise<ExecResult> {
         const cwd = opts?.cwd ?? this.cwd;
         const nodeBin = join(cwd, "node_modules", ".bin");
-        const pathEnv = process.env.PATH ?? "";
+        const baseEnv = this.sanitizedEnv();
+        const pathEnv = baseEnv.PATH ?? "";
         const newPath = nodeBin + (pathEnv ? pathDelimiter + pathEnv : "");
-        const env = { ...process.env, ...opts?.env, PAGER: "cat", PATH: newPath };
+        const env = { ...baseEnv, ...opts?.env, PAGER: "cat", PATH: newPath };
         try {
             const { stdout, stderr } = await execAsync(command, {
                 timeout: opts?.timeout ?? 30_000,

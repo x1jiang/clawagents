@@ -376,21 +376,60 @@ export async function createClawAgent({
 
     const registry = new ToolRegistry();
 
-    // ── Built-in tools (backed by sandbox) ───────────────────────────
-    const { createFilesystemTools } = await import("./tools/filesystem.js");
-    const { createExecTools } = await import("./tools/exec.js");
-    const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
+    // ── Built-in tools (lazy where possible) ──────────────────────
+    // Sandbox-backed tools use LazyTool: schema is available immediately
+    // for the LLM, but the module + sandbox init happens on first execute().
+    const { LazyFactoryTool } = await import("./tools/registry.js");
+
+    // Eager: cheap, no dependencies
     const { todolistTools } = await import("./tools/todolist.js");
     const { thinkTools } = await import("./tools/think.js");
-    const { webTools } = await import("./tools/web.js");
     const { interactiveTools } = await import("./tools/interactive.js");
-
-    for (const tool of [
-        ...createFilesystemTools(sb), ...createExecTools(sb), ...todolistTools,
-        ...thinkTools, ...webTools, ...createAdvancedFsTools(sb), ...interactiveTools,
-    ]) {
+    for (const tool of [...todolistTools, ...thinkTools, ...interactiveTools]) {
         registry.register(tool);
     }
+
+    // Lazy: sandbox-backed tools (filesystem, exec, advanced-fs, web)
+    const lazyFilesystemTools: Array<{ name: string; description: string; parameters: any }> = [
+        { name: "ls", description: "List directory contents with size and modification time", parameters: { path: { type: "string", description: "Directory path (default: cwd)" } } },
+        { name: "read_file", description: "Read a file with line numbers and optional pagination", parameters: { path: { type: "string", description: "File path to read", required: true }, offset: { type: "number", description: "Start line (0-based)" }, limit: { type: "number", description: "Max lines to return" } } },
+        { name: "write_file", description: "Write content to a file (creates dirs automatically)", parameters: { path: { type: "string", description: "File path", required: true }, content: { type: "string", description: "Content to write", required: true } } },
+        { name: "edit_file", description: "Replace text in a file", parameters: { path: { type: "string", description: "File path", required: true }, old_text: { type: "string", description: "Text to find", required: true }, new_text: { type: "string", description: "Replacement", required: true }, replace_all: { type: "string", description: "Replace all occurrences (true/false)" } } },
+        { name: "grep", description: "Search for text/regex in files", parameters: { pattern: { type: "string", description: "Search pattern (regex)", required: true }, path: { type: "string", description: "File or directory to search" }, include: { type: "string", description: "Glob filter (e.g. *.ts)" } } },
+        { name: "glob", description: "Find files matching a glob pattern", parameters: { pattern: { type: "string", description: "Glob pattern (e.g. **/*.ts)", required: true }, path: { type: "string", description: "Base directory" } } },
+    ];
+    for (const schema of lazyFilesystemTools) {
+        registry.register(new LazyFactoryTool(schema.name, schema.description, schema.parameters, async () => {
+            const { createFilesystemTools } = await import("./tools/filesystem.js");
+            const tools = createFilesystemTools(sb);
+            return tools.find((t) => t.name === schema.name)!;
+        }));
+    }
+
+    registry.register(new LazyFactoryTool("execute",
+        "Execute a shell command and return its output. Use for running scripts, installing packages, checking system state, etc.",
+        { command: { type: "string", description: "The shell command to execute", required: true }, timeout: { type: "number", description: "Timeout in milliseconds. Default: 30000" } },
+        async () => { const { createExecTools } = await import("./tools/exec.js"); return createExecTools(sb)[0]!; },
+    ));
+
+    const lazyAdvancedFsTools: Array<{ name: string; description: string; parameters: any }> = [
+        { name: "tree", description: "Show recursive directory tree", parameters: { path: { type: "string", description: "Root directory" }, depth: { type: "number", description: "Max depth" } } },
+        { name: "diff", description: "Unified diff between two files", parameters: { file_a: { type: "string", description: "First file", required: true }, file_b: { type: "string", description: "Second file", required: true } } },
+        { name: "insert_lines", description: "Insert text at a specific line number", parameters: { path: { type: "string", description: "File path", required: true }, line: { type: "number", description: "Line number", required: true }, content: { type: "string", description: "Content to insert", required: true } } },
+    ];
+    for (const schema of lazyAdvancedFsTools) {
+        registry.register(new LazyFactoryTool(schema.name, schema.description, schema.parameters, async () => {
+            const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
+            const tools = createAdvancedFsTools(sb);
+            return tools.find((t) => t.name === schema.name)!;
+        }));
+    }
+
+    registry.register(new LazyFactoryTool("web_fetch",
+        "Fetch a URL and return its content (HTML stripped to text, 50KB cap)",
+        { url: { type: "string", description: "URL to fetch", required: true } },
+        async () => { const { webTools } = await import("./tools/web.js"); return webTools.find((t) => t.name === "web_fetch")!; },
+    ));
 
     // ── Adapt and register user-provided tools ───────────────────────
     if (tools) {

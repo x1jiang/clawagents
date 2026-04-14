@@ -257,6 +257,84 @@ describe("advisor model", () => {
     });
 });
 
+// ─── Credential isolation ───────────────────────────────────────────────
+
+describe("credential isolation", () => {
+    it("sanitizedEnv strips sensitive keys", async () => {
+        const { LocalBackend } = await import("./sandbox/local.js");
+
+        process.env["OPENAI_API_KEY"] = "sk-test-secret";
+        process.env["SAFE_VAR"] = "safe-value";
+
+        const backend = new LocalBackend();
+        // Access private method via bracket notation
+        const sanitized = (backend as any).sanitizedEnv();
+
+        assert.equal(sanitized["OPENAI_API_KEY"], undefined);
+        assert.equal(sanitized["SAFE_VAR"], "safe-value");
+
+        delete process.env["OPENAI_API_KEY"];
+        delete process.env["SAFE_VAR"];
+    });
+
+    it("execute tool does not leak API keys", async () => {
+        const { LocalBackend } = await import("./sandbox/local.js");
+
+        process.env["OPENAI_API_KEY"] = "sk-leaked-key";
+
+        const backend = new LocalBackend();
+        const result = await backend.exec("env");
+
+        // stdout should NOT contain the key
+        assert.ok(!result.stdout.includes("sk-leaked-key"),
+            "API key leaked into subprocess env");
+
+        delete process.env["OPENAI_API_KEY"];
+    });
+});
+
+// ─── Lazy tool provisioning ────────────────────────────────────────────
+
+describe("lazy tool provisioning", () => {
+    it("LazyFactoryTool defers execution", async () => {
+        const { LazyFactoryTool } = await import("./tools/registry.js");
+
+        let factoryCalled = false;
+        const mockTool: any = {
+            name: "mock",
+            description: "mock tool",
+            parameters: {},
+            execute: async () => ({ success: true, output: "lazy result" }),
+        };
+
+        const lazy = new LazyFactoryTool("mock", "mock tool", {}, async () => {
+            factoryCalled = true;
+            return mockTool;
+        });
+
+        // Factory not called yet
+        assert.equal(factoryCalled, false);
+        assert.equal(lazy.name, "mock");
+
+        // First execute triggers factory
+        const result = await lazy.execute({});
+        assert.equal(factoryCalled, true);
+        assert.equal(result.output, "lazy result");
+    });
+
+    it("createClawAgent registers lazy filesystem tools", async () => {
+        const { createClawAgent } = await import("./agent.js");
+        const agent = await createClawAgent({ model: "gpt-5-nano" });
+
+        // Tools should be registered
+        const toolNames = agent.tools.list().map((t: any) => t.name);
+        assert.ok(toolNames.includes("read_file"));
+        assert.ok(toolNames.includes("execute"));
+        assert.ok(toolNames.includes("ls"));
+        assert.ok(toolNames.includes("grep"));
+    });
+});
+
 // ─── Built-in tools exist ───────────────────────────────────────────────
 
 describe("built-in tool registration", () => {

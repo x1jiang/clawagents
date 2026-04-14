@@ -39,6 +39,32 @@ import { validateToolArgs, formatValidationErrors } from "./validate.js";
 import { resolve } from "node:path";
 import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 
+// ─── Lazy Factory Tool ──────────────────────────────────────────────────────
+// Like LazyTool but accepts a factory function instead of module+class.
+// Defers tool creation to first execute() call.
+
+export class LazyFactoryTool implements Tool {
+    private _factory: (() => Promise<Tool>) | null;
+    private _resolved: Tool | null = null;
+
+    constructor(
+        public readonly name: string,
+        public readonly description: string,
+        public readonly parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>,
+        factory: () => Promise<Tool>,
+    ) {
+        this._factory = factory;
+    }
+
+    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+        if (!this._resolved) {
+            this._resolved = await this._factory!();
+            this._factory = null;
+        }
+        return this._resolved.execute(args);
+    }
+}
+
 // ─── Constants (aligned with deepagents/openclaw) ─────────────────────────
 
 const MAX_TOOL_OUTPUT_CHARS = 12_000;
