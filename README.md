@@ -157,6 +157,25 @@ const result = await agent.invoke("Build the data pipeline");
 // Next run: lessons injected into system prompt automatically
 ```
 
+### With Advisor Model (smart model guides cheap model)
+
+```ts
+// GPT-5.4-nano executes, GPT-5.4 advises 2-3 times per task
+const agent = await createClawAgent({
+    model: "gpt-5.4-nano",
+    advisorModel: "gpt-5.4",
+});
+
+// Cross-provider: Gemini Flash executes, Opus advises
+const agent = await createClawAgent({
+    model: "gemini-3-flash",
+    advisorModel: "claude-opus-4-6",
+    advisorApiKey: "sk-ant-...",
+});
+```
+
+The advisor is consulted at three points: (1) after initial orientation, before committing to an approach, (2) when stuck (consecutive failures trigger rethink), and (3) before declaring the task complete. Set `ADVISOR_MODEL` in `.env` or pass `advisorModel` in code.
+
 ### Azure OpenAI
 
 ```ts
@@ -247,6 +266,7 @@ npx tsx src/index.ts --task "hello world"                    # 5. Run first task
 | `--sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). |
 | `--resume [ID\|latest]` | Resume a saved session from JSONL. Defaults to `latest`. |
 | `--help` | Show all options with examples. |
+| `--advisor MODEL` | Pair a stronger model for strategic guidance (e.g. `--advisor gpt-5.4`). |
 
 ---
 
@@ -295,6 +315,14 @@ All parameters are **optional** — zero-config usage (`createClawAgent()`) work
 | `learn` | `boolean` | env `CLAW_LEARN` / `false` | No | Enable full PTRL: lessons, LLM-as-Judge, thinking token preservation. Implies `trajectory: true` |
 | `previewChars` | `number` | env `CLAW_PREVIEW_CHARS` / `120` | No | Max chars for tool-output previews in trajectory logs |
 | `responseChars` | `number` | env `CLAW_RESPONSE_CHARS` / `500` | No | Max chars for LLM response text in trajectory records |
+
+**Advisor Model**
+
+| Param | Type | Default | Required? | Description |
+|:---|:---|:---|:---:|:---|
+| `advisorModel` | `string \| LLMProvider` | env `ADVISOR_MODEL` / `undefined` | No | Stronger model for strategic guidance. Consulted 2-3 times per task. Cross-provider supported |
+| `advisorApiKey` | `string` | env `ADVISOR_API_KEY` / `undefined` | No | API key for the advisor (only if different provider than executor) |
+| `advisorMaxCalls` | `number` | env `ADVISOR_MAX_CALLS` / `3` | No | Max advisor consultations per task |
 
 > **Priority:** Explicit parameter > environment variable > default value. You never need to set both.
 
@@ -511,6 +539,25 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_HOOK_POST_LLM` | Shell command after each LLM response. Fire-and-forget logging. |
 
 ## Changelog
+
+### v6.1.0 — Advisor Model: Smart Model Guides Cheap Model
+
+Pair a stronger "advisor" model with a cheaper "executor" model. The executor runs every turn; the advisor is consulted 2-3 times per task for strategic guidance. Cross-provider supported — any model can advise any other model.
+
+| Feature | Description |
+|:---|:---|
+| **Advisor Model** | New `advisorModel` config field. Set it and the agent gets smarter. Don't set it, nothing changes. Fully backward compatible. |
+| **Three Trigger Points** | (1) After initial orientation, before planning. (2) When stuck (consecutive failures). (3) Before declaring done. |
+| **Cross-Provider** | Mix providers freely: `gpt-5.4-nano` executor + `claude-opus-4-6` advisor, or any combination. |
+| **CLI Flag** | `--advisor MODEL` flag for one-line usage. |
+| **Env Config** | `ADVISOR_MODEL`, `ADVISOR_API_KEY`, `ADVISOR_MAX_CALLS` env vars. |
+
+```ts
+const agent = await createClawAgent({
+    model: "gpt-5.4-nano",
+    advisorModel: "gpt-5.4",
+});
+```
 
 ### v6.0.0 — Production Hardening: 17 Improvements
 

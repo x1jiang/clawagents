@@ -381,6 +381,18 @@ async function main() {
     const timeoutIdx = args.indexOf("--timeout");
     const timeoutS = timeoutIdx >= 0 ? parseInt(args[timeoutIdx + 1] ?? "0", 10) : 0;
 
+    // --advisor MODEL
+    let advisorModel: string | undefined;
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--advisor" && i + 1 < args.length) {
+            advisorModel = args[i + 1]!;
+            break;
+        } else if (args[i]?.startsWith("--advisor=")) {
+            advisorModel = args[i]!.substring(10);
+            break;
+        }
+    }
+
     // --task "..."
     let task = "";
     for (let i = 0; i < args.length; i++) {
@@ -397,10 +409,15 @@ async function main() {
         const banner = buildBanner();
         const config = loadConfig();
         const activeModel = getDefaultModel(config);
-        const agent = await createClawAgent({ model: activeModel, streaming: config.streaming, timeoutS });
+        const agent = await createClawAgent({
+            model: activeModel,
+            streaming: config.streaming,
+            timeoutS,
+            advisorModel: advisorModel ?? (config.advisorModel || undefined),
+        });
         const toolCount = agent.tools.list().length;
         if (!quiet) process.stderr.write(`${banner} | ${toolCount} tools\n`);
-        if (verbose) process.stderr.write(`[verbose] timeout=${timeoutS}s model=${activeModel}\n`);
+        if (verbose) process.stderr.write(`[verbose] timeout=${timeoutS}s model=${activeModel}${agent.advisorLLM ? ` advisor=${advisorModel || config.advisorModel}` : ""}\n`);
         await agent.invoke(task);
         process.exit(0);
     }
@@ -431,6 +448,7 @@ Options:
   --verbose, -v       Verbose output
   --quiet, -q         Quiet mode (suppress banner)
   --timeout N         Global timeout in seconds (0 = no limit)
+  --advisor MODEL     Stronger model for strategic guidance (e.g. gpt-5.4, claude-opus-4-6)
 
 Quick start:
   npm install git+https://github.com/x1jiang/clawagents.git

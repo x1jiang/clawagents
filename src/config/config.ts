@@ -44,6 +44,9 @@ export interface EngineConfig {
     streaming: boolean;
     gatewayApiKey: string;
     clawLearnModel: string;
+    advisorModel: string;
+    advisorApiKey: string;
+    advisorMaxCalls: number;
 }
 
 export function loadConfig(): EngineConfig {
@@ -68,6 +71,9 @@ export function loadConfig(): EngineConfig {
         streaming,
         gatewayApiKey: process.env["GATEWAY_API_KEY"] ?? "",
         clawLearnModel: process.env["CLAW_LEARN_MODEL"] ?? "",
+        advisorModel: process.env["ADVISOR_MODEL"] ?? "",
+        advisorApiKey: process.env["ADVISOR_API_KEY"] ?? "",
+        advisorMaxCalls: Number(process.env["ADVISOR_MAX_CALLS"] ?? 3) || 3,
     };
 }
 

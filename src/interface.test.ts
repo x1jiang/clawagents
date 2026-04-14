@@ -193,6 +193,70 @@ describe("raw hooks", () => {
     });
 });
 
+// ─── Advisor Model ─────────────────────────────────────────────────────
+
+describe("advisor model", () => {
+    it("ClawAgent stores advisor fields", async () => {
+        const { ClawAgent } = await import("./agent.js");
+        const mockLLM: any = { name: "mock", chat: async () => ({ content: "ok", model: "mock", tokensUsed: 10 }) };
+        const mockAdvisor: any = { name: "advisor-mock", chat: async () => ({ content: "do X", model: "advisor", tokensUsed: 5 }) };
+
+        const agent = new ClawAgent(
+            mockLLM, new ToolRegistry(), undefined, true, true, 100000,
+            undefined, undefined, undefined, undefined, false, false, false,
+            200, 120, 500, 0, undefined, mockAdvisor, 5,
+        );
+
+        assert.equal(agent.advisorLLM, mockAdvisor);
+        assert.equal(agent.advisorMaxCalls, 5);
+    });
+
+    it("ClawAgent defaults advisorLLM to undefined", async () => {
+        const { ClawAgent } = await import("./agent.js");
+        const mockLLM: any = { name: "mock", chat: async () => ({ content: "ok", model: "mock", tokensUsed: 10 }) };
+
+        const agent = new ClawAgent(mockLLM, new ToolRegistry());
+
+        assert.equal(agent.advisorLLM, undefined);
+        assert.equal(agent.advisorMaxCalls, 3);
+    });
+
+    it("createClawAgent resolves advisorModel from string", async () => {
+        const { createClawAgent } = await import("./agent.js");
+
+        const agent = await createClawAgent({
+            model: "gpt-5-nano",
+            advisorModel: "gpt-5-nano",
+        });
+
+        assert.ok(agent.advisorLLM !== undefined);
+        assert.equal(agent.advisorMaxCalls, 3);
+    });
+
+    it("createClawAgent works without advisorModel", async () => {
+        const { createClawAgent } = await import("./agent.js");
+
+        const agent = await createClawAgent({
+            model: "gpt-5-nano",
+        });
+
+        assert.equal(agent.advisorLLM, undefined);
+    });
+
+    it("advisorMaxCalls respects env var", async () => {
+        process.env["ADVISOR_MAX_CALLS"] = "7";
+        const { createClawAgent } = await import("./agent.js");
+
+        const agent = await createClawAgent({
+            model: "gpt-5-nano",
+            advisorModel: "gpt-5-nano",
+        });
+
+        assert.equal(agent.advisorMaxCalls, 7);
+        delete process.env["ADVISOR_MAX_CALLS"];
+    });
+});
+
 // ─── Built-in tools exist ───────────────────────────────────────────────
 
 describe("built-in tool registration", () => {

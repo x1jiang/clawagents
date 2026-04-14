@@ -88,6 +88,8 @@ export class ClawAgent {
     public responseChars: number;
     public timeoutS: number;
     public features?: Record<string, boolean>;
+    public advisorLLM?: LLMProvider;
+    public advisorMaxCalls: number;
 
     /**
      * @param llm - The instantiated LLM provider structure
@@ -117,6 +119,8 @@ export class ClawAgent {
         responseChars = 500,
         timeoutS = 0,
         features?: Record<string, boolean>,
+        advisorLLM?: LLMProvider,
+        advisorMaxCalls = 3,
     ) {
         this.llm = llm;
         this.tools = tools;
@@ -136,6 +140,8 @@ export class ClawAgent {
         this.responseChars = responseChars;
         this.timeoutS = timeoutS;
         this.features = features;
+        this.advisorLLM = advisorLLM;
+        this.advisorMaxCalls = advisorMaxCalls;
     }
 
     /**
@@ -172,6 +178,8 @@ export class ClawAgent {
             this.responseChars,
             timeoutS ?? this.timeoutS,
             features ?? this.features,
+            this.advisorLLM,
+            this.advisorMaxCalls,
         );
     }
 
@@ -291,6 +299,9 @@ export async function createClawAgent({
     timeoutS,
     features,
     fallbackModels,
+    advisorModel,
+    advisorApiKey,
+    advisorMaxCalls,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
@@ -317,6 +328,12 @@ export async function createClawAgent({
     features?: Record<string, boolean>;
     /** Optional fallback LLM providers. When the primary provider fails, these are tried in order. */
     fallbackModels?: LLMProvider[];
+    /** A stronger model to consult for strategic guidance (2-3 times per task). Cross-provider supported. */
+    advisorModel?: string | LLMProvider;
+    /** API key for the advisor model (only needed if it's a different provider). */
+    advisorApiKey?: string;
+    /** Max advisor consultations per task (default: 3). */
+    advisorMaxCalls?: number;
 } = {}): Promise<ClawAgent> {
     // ── Resolve opt-in flags ─────────────────────────────────────────
     const envTrue = (key: string) => ["1", "true", "yes"].includes(
@@ -341,6 +358,17 @@ export async function createClawAgent({
     if (fallbackModels && fallbackModels.length > 0) {
         const { FallbackProvider } = await import("./providers/fallback.js");
         llm = new FallbackProvider(llm, fallbackModels);
+    }
+
+    // ── Resolve advisor model ────────────────────────────────────────
+    let resolvedAdvisorLLM: LLMProvider | undefined;
+    const resolvedAdvisorMaxCalls = advisorMaxCalls ?? envInt("ADVISOR_MAX_CALLS", 3);
+    {
+        const advisorSpec = advisorModel ?? (process.env["ADVISOR_MODEL"] || undefined);
+        if (advisorSpec) {
+            const advKey = advisorApiKey ?? (process.env["ADVISOR_API_KEY"] || undefined);
+            resolvedAdvisorLLM = await resolveModel(advisorSpec, streaming, advKey, contextWindow);
+        }
     }
 
     // ── Resolve sandbox backend ──────────────────────────────────────
@@ -437,7 +465,7 @@ export async function createClawAgent({
         llm, registry, instruction, streaming, useNativeTools, resolvedContextWindow, onEvent,
         composedBeforeLLM ?? undefined, undefined, undefined, enableTrajectory, enableRethink,
         enableLearn, resolvedMaxIterations, resolvedPreviewChars, resolvedResponseChars,
-        resolvedTimeoutS, features,
+        resolvedTimeoutS, features, resolvedAdvisorLLM, resolvedAdvisorMaxCalls,
     );
 
     // ── Sub-agent tool (always available) ────────────────────────────

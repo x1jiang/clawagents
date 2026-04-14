@@ -1099,6 +1099,8 @@ export async function runAgentGraph(
     responseChars = 500,
     timeoutS = 0,
     features?: Record<string, boolean>,
+    advisorLLM?: LLMProvider,
+    advisorMaxCalls = 3,
 ): Promise<AgentState> {
     if (features) {
         setOverrides(features);
@@ -1183,6 +1185,27 @@ export async function runAgentGraph(
         sessionWriter.writeSystemPrompt(systemContent);
     }
 
+    // ── Advisor model: phone-a-friend for strategic guidance ────────
+    let advisorCallCount = 0;
+    const consultAdvisor = async (msgs: LLMMessage[], trigger: string): Promise<void> => {
+        if (!advisorLLM || advisorCallCount >= advisorMaxCalls) return;
+        advisorCallCount++;
+        emit("context", { message: `advisor consultation #${advisorCallCount} (${trigger})` });
+        try {
+            const advisorResponse = await advisorLLM.chat([
+                { role: "system", content: "You are a senior advisor. Review the agent's full transcript and provide concise strategic guidance. Under 150 words. Use numbered steps, not explanations." },
+                ...msgs,
+                { role: "user", content: `[Advisor Request — ${trigger}] Review the conversation above and provide strategic guidance for the next steps.` },
+            ]);
+            if (advisorResponse.content) {
+                msgs.push({ role: "user", content: `[Advisor Guidance]\n${advisorResponse.content}` });
+                emit("context", { message: `advisor: ${advisorResponse.content.slice(0, 120)}...` });
+            }
+        } catch (err) {
+            emit("warn", { message: `advisor consultation failed: ${err}` });
+        }
+    };
+
     // Initialize tokenizer encoder for accurate token counting
     await initTokenizer(resolvedModelName);
 
@@ -1239,6 +1262,11 @@ export async function runAgentGraph(
                 state.status = "error";
                 state.result = String(err);
                 break;
+            }
+
+            // ── Advisor: consult after initial orientation (first tool results in transcript)
+            if (advisorLLM && roundIdx === 1 && advisorCallCount === 0) {
+                await consultAdvisor(messages, "planning");
             }
 
             // Write-ahead log: persist last message before API call (Claude Code pattern)
@@ -1367,6 +1395,16 @@ export async function runAgentGraph(
                         content: "Your previous response was cut off mid-JSON. Please resend the complete tool call as valid JSON.",
                     });
                     continue;
+                }
+
+                // ── Advisor: final check before declaring done ──
+                if (advisorLLM && advisorCallCount > 0 && advisorCallCount < advisorMaxCalls && state.toolCalls > 0) {
+                    messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
+                    await consultAdvisor(messages, "final-check");
+                    // If advisor injected guidance, let the LLM process it
+                    if (messages[messages.length - 1]?.content?.toString().startsWith("[Advisor Guidance]")) {
+                        continue;
+                    }
                 }
 
                 if (recorder) {
@@ -1613,6 +1651,8 @@ export async function runAgentGraph(
                         );
                     } catch { /* fallback */ }
                     if (failureTracker.shouldRethink()) {
+                        // ── Advisor: consult when stuck ──
+                        await consultAdvisor(messages, "stuck");
                         const nFails = failureTracker.consecutiveFailures;
                         const rethinkNum = failureTracker.bumpRethink();
                         emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive failures (threshold=${failureTracker.threshold})` });
@@ -1804,6 +1844,8 @@ export async function runAgentGraph(
                         );
                     } catch { /* fallback */ }
                     if (failureTracker.shouldRethink()) {
+                        // ── Advisor: consult when stuck ──
+                        await consultAdvisor(messages, "stuck");
                         const nFails = failureTracker.consecutiveFailures;
                         const rethinkNum = failureTracker.bumpRethink();
                         emit("warn", { message: `rethink #${rethinkNum}: ${nFails} consecutive failures (threshold=${failureTracker.threshold})` });
