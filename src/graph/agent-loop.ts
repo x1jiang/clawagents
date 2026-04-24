@@ -26,6 +26,18 @@ import type { ToolRegistry, ParsedToolCall } from "../tools/registry.js";
 import { writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setOverrides } from "../config/features.js";
+import { RunContext, type ApprovalRecord } from "../run-context.js";
+import { Usage } from "../usage.js";
+import { streamEventFromKind, type StreamEvent } from "../stream-events.js";
+import type { RunHooks } from "../lifecycle.js";
+import {
+    type InputGuardrail,
+    type OutputGuardrail,
+    GuardrailBehavior,
+    GuardrailTripwireTriggered,
+} from "../guardrails.js";
+import type { Session } from "../session/backends.js";
+import { RetryPolicy } from "../retry.js";
 
 // ─── Model Control Token Sanitization ─────────────────────────────────────
 // Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)
@@ -150,21 +162,89 @@ interface ModelProfile {
     budgetRatio: number;
 }
 
+// NOTE: Order matters for the prefix-match fallback below. List the *most
+// specific* keys first so e.g. "gpt-5.4-medium" resolves to the "gpt-5.4"
+// profile rather than falling back to "gpt-5".
 const MODEL_PROFILES: Record<string, ModelProfile> = {
-    // OpenAI
-    "gpt-5": { maxInputTokens: 128_000, budgetRatio: 0.80 },
-    "gpt-5-mini": { maxInputTokens: 128_000, budgetRatio: 0.80 },
-    "gpt-5-nano": { maxInputTokens: 128_000, budgetRatio: 0.80 },
-    "gpt-4o": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    // ── OpenAI — GPT-5 family (400K context) ───────────────────────────
+    "gpt-5.4-mini": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.4-nano": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.4": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.3-codex": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.3-mini": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.3": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.2-mini": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.2": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.1-codex": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.1-mini": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5.1": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5-codex": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5-mini": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5-nano": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    "gpt-5": { maxInputTokens: 400_000, budgetRatio: 0.85 },
+    // ── OpenAI — GPT-4.1 (1M context) ──────────────────────────────────
+    "gpt-4.1-mini": { maxInputTokens: 1_000_000, budgetRatio: 0.85 },
+    "gpt-4.1-nano": { maxInputTokens: 1_000_000, budgetRatio: 0.85 },
+    "gpt-4.1": { maxInputTokens: 1_000_000, budgetRatio: 0.85 },
+    // ── OpenAI — GPT-4o (128K context) ─────────────────────────────────
     "gpt-4o-mini": { maxInputTokens: 128_000, budgetRatio: 0.80 },
-    // Gemini
-    "gemini-3-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gpt-4o": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    // ── OpenAI — reasoning (o-series) ──────────────────────────────────
+    "o4-mini": { maxInputTokens: 200_000, budgetRatio: 0.80 },
+    "o3-mini": { maxInputTokens: 200_000, budgetRatio: 0.80 },
+    "o3": { maxInputTokens: 200_000, budgetRatio: 0.80 },
+    "o1-pro": { maxInputTokens: 200_000, budgetRatio: 0.80 },
+    "o1-mini": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "o1": { maxInputTokens: 200_000, budgetRatio: 0.80 },
+    // ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    "gemini-3.1-pro": { maxInputTokens: 2_000_000, budgetRatio: 0.90 },
+    "gemini-3.1-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3.1": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3-pro": { maxInputTokens: 2_000_000, budgetRatio: 0.90 },
     "gemini-3-flash-preview": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    // ── Google — Gemini 2.5 ────────────────────────────────────────────
+    "gemini-2.5-pro": { maxInputTokens: 2_000_000, budgetRatio: 0.90 },
     "gemini-2.5-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
-    "gemini-2.5-pro": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
-    // Claude
-    "claude-sonnet-4-5": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    // ── Anthropic — Claude 4.x ─────────────────────────────────────────
+    "claude-opus-4-7": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    "claude-opus-4-5": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    "claude-opus-4": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    "claude-4.6-sonnet": { maxInputTokens: 1_000_000, budgetRatio: 0.85 },
+    "claude-4.5-sonnet": { maxInputTokens: 1_000_000, budgetRatio: 0.85 },
+    "claude-sonnet-4-5": { maxInputTokens: 1_000_000, budgetRatio: 0.85 },
+    "claude-sonnet-4": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    // ── Anthropic — Claude 3.x ─────────────────────────────────────────
+    "claude-3-7-sonnet": { maxInputTokens: 200_000, budgetRatio: 0.85 },
     "claude-3-5-sonnet": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    "claude-3-5-haiku": { maxInputTokens: 200_000, budgetRatio: 0.85 },
+    // ── Ollama / local OpenAI-compatible models ────────────────────────
+    // NOTE: prefix-matching walks in insertion order. Put specific tags
+    // (`gemma4:e4b`) before generic families (`gemma4`) before legacy
+    // prefixes (`gemma3`/`gemma`) so "gemma4:e4b" doesn't collapse to
+    // the 8K Gemma-1 default.
+    // ── Google — Gemma 4 (released 2026-04-02; Apache-2.0) ─────────────
+    "gemma4:e2b": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "gemma4:e4b": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "gemma4:26b": { maxInputTokens: 256_000, budgetRatio: 0.85 },
+    "gemma4:31b": { maxInputTokens: 256_000, budgetRatio: 0.85 },
+    "gemma4": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    // ── Google — Gemma 3n (edge/mobile 32K) ────────────────────────────
+    "gemma3n:e4b": { maxInputTokens: 32_000, budgetRatio: 0.80 },
+    "gemma3n:e2b": { maxInputTokens: 32_000, budgetRatio: 0.80 },
+    "gemma3n": { maxInputTokens: 32_000, budgetRatio: 0.80 },
+    // ── Google — Gemma 3 / 2 / 1 ───────────────────────────────────────
+    "gemma3": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "gemma2": { maxInputTokens: 8_192, budgetRatio: 0.75 },
+    "gemma": { maxInputTokens: 8_192, budgetRatio: 0.75 },
+    "llama3.3": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "llama3.2": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "llama3.1": { maxInputTokens: 128_000, budgetRatio: 0.80 },
+    "qwen2.5-coder": { maxInputTokens: 32_768, budgetRatio: 0.80 },
+    "qwen2.5": { maxInputTokens: 32_768, budgetRatio: 0.80 },
+    "deepseek-r1": { maxInputTokens: 64_000, budgetRatio: 0.75 },
+    "mistral": { maxInputTokens: 32_768, budgetRatio: 0.80 },
+    "phi4": { maxInputTokens: 16_384, budgetRatio: 0.75 },
 };
 
 function resolveContextBudget(modelName: string, contextWindow: number): { window: number; ratio: number } {
@@ -192,6 +272,14 @@ export interface AgentState {
     toolCalls: number;
     trajectoryFile?: string;
     sessionFile?: string;
+    /** Per-run token usage accumulator (mirrors openai-agents-python). */
+    usage?: Usage;
+    /** Typed/parsed final output when `outputType` is configured. */
+    finalOutput?: unknown;
+    /** The RunContext threaded through tools, hooks, and guardrails. */
+    runContext?: RunContext<unknown>;
+    /** Guardrail tripwire info, if any guardrail rejected content or raised. */
+    guardrailTripped?: { source: "input" | "output"; guardrail: string; behavior: GuardrailBehavior; message?: string };
 }
 
 // ─── Event System ─────────────────────────────────────────────────────────
@@ -206,7 +294,17 @@ export type EventKind =
     | "context"
     | "final_content"
     | "approval_required"
-    | "tool_skipped";
+    | "tool_skipped"
+    // Typed stream events (mirrors openai-agents-python)
+    | "turn_started"
+    | "assistant_text"
+    | "assistant_delta"
+    | "tool_call_planned"
+    | "tool_started"
+    | "tool_result_typed"
+    | "usage"
+    | "guardrail_tripped"
+    | "final_output";
 
 export type OnEvent = (kind: EventKind, data: Record<string, unknown>) => void;
 
@@ -1079,7 +1177,63 @@ function looksLikeTruncatedJson(text: string): boolean {
 
 const MAX_TOOL_ROUNDS = 1000;
 
-export async function runAgentGraph(
+// ─── Rich Extras (mirrors openai-agents-python surfaces) ──────────────────
+
+/** Callback invoked for every typed stream event. */
+export type OnStreamEvent = (event: StreamEvent) => void | Promise<void>;
+
+/**
+ * Per-tool-call approval callback. Called when the agent is about to run a
+ * tool for which no sticky approval record exists on the RunContext. Return
+ * a record (approved or rejected) to proceed; return undefined to reject
+ * the call with a generic "approval not granted" reason.
+ */
+export type ApprovalHandler = (args: {
+    toolName: string;
+    toolCallId: string;
+    args: Record<string, unknown>;
+    runContext: RunContext<unknown>;
+}) => Promise<ApprovalRecord | undefined> | ApprovalRecord | undefined;
+
+/**
+ * Structured output coercion. When provided, the agent will attempt to
+ * parse the final assistant text into this schema and populate
+ * `state.finalOutput`. Two shapes are supported:
+ *   • a Zod-like schema exposing `.safeParse(value)`
+ *   • a plain function `(text: string) => T`
+ */
+export type OutputTypeSpec =
+    | { safeParse(value: unknown): { success: true; data: unknown } | { success: false; error: unknown } }
+    | ((text: string) => unknown);
+
+export interface AgentLoopExtras<TContext = unknown> {
+    /** Pre-initialised RunContext. A fresh one is created if omitted. */
+    runContext?: RunContext<TContext>;
+    /** Optional user context value to seed `runContext.context`. */
+    context?: TContext;
+    /** Lifecycle hooks (on_run_start / on_tool_end / …). */
+    hooks?: RunHooks<TContext>;
+    /** Per-agent hooks; fires on_agent_start/end in addition to run-level hooks. */
+    agentHooks?: RunHooks<TContext>;
+    /** Input guardrails — run before the first LLM call. */
+    inputGuardrails?: InputGuardrail<TContext>[];
+    /** Output guardrails — run against the final assistant text. */
+    outputGuardrails?: OutputGuardrail<TContext>[];
+    /** Structured output coercion. Sets `state.finalOutput` when it parses. */
+    outputType?: OutputTypeSpec;
+    /** Pluggable conversation-history backend. */
+    session?: Session;
+    /** Typed stream-event sink (in addition to the legacy `onEvent`). */
+    onStreamEvent?: OnStreamEvent;
+    /** Consulted when a tool call has no sticky approval on the RunContext. */
+    approvalHandler?: ApprovalHandler;
+    /** Name exposed to hooks as the current agent's identity. */
+    agentName?: string;
+    /** Composable retry policy (not yet wired into every LLM call — exposed for downstream use). */
+    retryPolicy?: RetryPolicy;
+}
+
+export async function runAgentGraph<TContext = unknown>(
     task: string,
     llm: LLMProvider,
     tools?: ToolRegistry,
@@ -1101,17 +1255,65 @@ export async function runAgentGraph(
     features?: Record<string, boolean>,
     advisorLLM?: LLMProvider,
     advisorMaxCalls = 3,
+    extras?: AgentLoopExtras<TContext>,
 ): Promise<AgentState> {
     if (features) {
         setOverrides(features);
     }
+
+    // ── Rich-surface bootstrap (openai-agents-python parity) ────────
+    const runContext: RunContext<TContext> = (extras?.runContext ??
+        new RunContext<TContext>({ context: extras?.context })) as RunContext<TContext>;
+    if (!runContext.usage) runContext.usage = new Usage();
+    const usage = runContext.usage;
+    const hooks: RunHooks<TContext> | undefined = extras?.hooks;
+    const agentHooks: RunHooks<TContext> | undefined = extras?.agentHooks;
+    const inputGuardrails = extras?.inputGuardrails ?? [];
+    const outputGuardrails = extras?.outputGuardrails ?? [];
+    const outputType = extras?.outputType;
+    const sessionBackend: Session | undefined = extras?.session;
+    const onStreamEvent = extras?.onStreamEvent;
+    const approvalHandler = extras?.approvalHandler;
+    const agentName = extras?.agentName ?? "ClawAgent";
 
     const registry = tools;
     let nativeSchemas: NativeToolSchema[] | undefined =
         useNativeTools && registry ? registry.toNativeSchemas() : undefined;
     let toolDesc = (!useNativeTools && registry) ? registry.describeForLLM() : "";
     const loopTracker = new ToolCallTracker();
-    const emit = onEvent ?? defaultOnEvent;
+
+    // Wrap the legacy `emit` so every event also lifts into the typed stream.
+    const legacyEmit = onEvent ?? defaultOnEvent;
+    const emit: OnEvent = (kind, data) => {
+        try { legacyEmit(kind, data); } catch { /* observer errors should not break the run */ }
+        if (onStreamEvent) {
+            try {
+                const ev = streamEventFromKind(kind as any, data);
+                void onStreamEvent(ev);
+            } catch { /* observer errors should not break the run */ }
+        }
+    };
+
+    const fireHook = async (
+        event: keyof RunHooks<TContext>,
+        payload: Record<string, unknown>,
+    ): Promise<void> => {
+        const targets: RunHooks<TContext>[] = [];
+        if (hooks) targets.push(hooks);
+        if (agentHooks) targets.push(agentHooks);
+        for (const target of targets) {
+            const fn = (target as any)[event];
+            if (typeof fn !== "function") continue;
+            try {
+                await fn.call(target, { runContext, agentName, ...payload });
+            } catch (hookErr) {
+                emit("warn", { message: `${String(event)} hook error: ${hookErr}` });
+            }
+        }
+    };
+
+    await fireHook("onRunStart", { task });
+    await fireHook("onAgentStart", { task });
 
     // Feature C + F: detect task type for adaptive rethink threshold
     let _taskType = "general";
@@ -1177,8 +1379,24 @@ export async function runAgentGraph(
     const systemContent = promptToUse + "\n\n" + toolDesc + "\n__CACHE_BOUNDARY__";
     let messages: LLMMessage[] = [
         { role: "system", content: systemContent },
-        { role: "user", content: task },
     ];
+
+    // ── Session backend preload (pluggable Session protocol) ───────────
+    let sessionStartCursor = messages.length;
+    if (sessionBackend) {
+        try {
+            const preloaded = await sessionBackend.getItems();
+            if (preloaded.length > 0) {
+                messages.push(...preloaded);
+                emit("context", { message: `session: preloaded ${preloaded.length} item(s) from ${sessionBackend.constructor.name}` });
+            }
+            sessionStartCursor = messages.length;
+        } catch (err) {
+            emit("warn", { message: `session preload failed: ${err}` });
+        }
+    }
+
+    messages.push({ role: "user", content: task });
 
     // Session: write initial state
     if (sessionWriter) {
@@ -1222,7 +1440,47 @@ export async function runAgentGraph(
         iterations: 0,
         maxIterations,
         toolCalls: 0,
+        usage,
+        runContext: runContext as RunContext<unknown>,
     };
+
+    // ── Input guardrails ─────────────────────────────────────────────
+    let inputGuardrailRejected = false;
+        for (const gr of inputGuardrails) {
+            let result;
+            try {
+                result = await (gr as InputGuardrail<TContext>).run(runContext, task);
+            } catch (grErr) {
+                emit("warn", { message: `input guardrail '${gr.name}' threw: ${grErr}` });
+                continue;
+            }
+            if (result.behavior === GuardrailBehavior.ALLOW) continue;
+            emit("guardrail_tripped", {
+                source: "input",
+                guardrail: gr.name,
+                behavior: result.behavior,
+                message: result.message,
+            });
+            state.guardrailTripped = {
+                source: "input",
+                guardrail: gr.name,
+                behavior: result.behavior,
+                message: result.message,
+            };
+            if (result.behavior === GuardrailBehavior.REJECT_CONTENT) {
+                state.status = "done";
+                state.result = result.replacementOutput
+                    ?? result.message
+                    ?? `Input rejected by guardrail '${gr.name}'.`;
+                inputGuardrailRejected = true;
+                break;
+            }
+            if (result.behavior === GuardrailBehavior.RAISE_EXCEPTION) {
+                await fireHook("onAgentEnd", { result: state.result });
+                await fireHook("onRunEnd", { state });
+                throw new GuardrailTripwireTriggered(gr.name, "input", result);
+            }
+        }
 
     let overflowRetries = 0;
     const ac = new AbortController();
@@ -1245,12 +1503,16 @@ export async function runAgentGraph(
     };
 
     try {
-        for (let roundIdx = 0; roundIdx < effectiveMaxRounds; roundIdx++) {
+        for (let roundIdx = 0; !inputGuardrailRejected && roundIdx < effectiveMaxRounds; roundIdx++) {
             if (ac.signal.aborted) {
                 state.status = "done";
                 state.result = state.result || "[cancelled]";
                 break;
             }
+
+            // Emit typed turn_started marker (openai-agents parity).
+            emit("turn_started", { iteration: roundIdx, agent: agentName });
+            await fireHook("onLLMStart", { iteration: roundIdx });
 
             // Session: mark turn start
             if (sessionWriter) sessionWriter.writeTurnStarted(roundIdx);
@@ -1307,6 +1569,31 @@ export async function runAgentGraph(
                     : nativeSchemas ? { tools: nativeSchemas } : undefined;
                 response = await llm.chat(messages, chatOptions);
                 if (!resolvedModelName && response.model) resolvedModelName = response.model;
+
+                // ── Usage accumulation (openai-agents parity) ─────────
+                {
+                    const totalTokens = response.tokensUsed ?? 0;
+                    const inputTokens = response.promptTokens ?? 0;
+                    const outputTokens = Math.max(totalTokens - inputTokens, 0);
+                    const req = usage.addResponse({
+                        model: response.model ?? "",
+                        inputTokens,
+                        outputTokens,
+                        totalTokens,
+                        cachedInputTokens: response.cacheReadTokens ?? 0,
+                        cacheCreationTokens: response.cacheCreationTokens ?? 0,
+                    });
+                    emit("usage", {
+                        model: req.model,
+                        inputTokens: req.inputTokens,
+                        outputTokens: req.outputTokens,
+                        totalTokens: req.totalTokens,
+                        cachedInputTokens: req.cachedInputTokens,
+                        cacheCreationTokens: req.cacheCreationTokens,
+                        cumulative: usage.totalTokens,
+                    });
+                }
+                await fireHook("onLLMEnd", { response });
 
                 // Session: write usage
                 if (sessionWriter) {
@@ -1518,10 +1805,51 @@ export async function runAgentGraph(
                     }
                 }
 
+                // ── Per-call approval (sticky via RunContext) ──────
+                const callId = nativeTc?.toolCallId || `synthetic-${roundIdx}-${call.toolName}`;
+                const existingApproval = runContext.isToolApproved(callId, { toolName: call.toolName });
+                let approvedByUser = existingApproval;
+                if (existingApproval === undefined && approvalHandler) {
+                    try {
+                        const record = await approvalHandler({
+                            toolName: call.toolName,
+                            toolCallId: callId,
+                            args: call.args,
+                            runContext: runContext as RunContext<unknown>,
+                        });
+                        if (record) {
+                            if (record.approved) runContext.approveTool(callId, { always: record.always, toolName: call.toolName });
+                            else runContext.rejectTool(callId, { always: record.always, toolName: call.toolName, reason: record.reason });
+                            approvedByUser = record.approved;
+                        }
+                    } catch (apprErr) { emit("warn", { message: `approvalHandler error: ${apprErr}` }); }
+                }
+                if (existingApproval === undefined && approvedByUser === undefined && inputGuardrails.length === 0 && !approvalHandler) {
+                    approvedByUser = true; // default: no approval gate configured → allow
+                }
+                if (approvedByUser === undefined) {
+                    emit("approval_required", { name: call.toolName, callId, args: call.args });
+                    approvedByUser = false;
+                }
+                if (!approvedByUser) {
+                    const reason = runContext.getApproval(callId, { toolName: call.toolName })?.reason ?? "approval not granted";
+                    emit("tool_skipped", { name: call.toolName, reason });
+                    messages.push({ role: "assistant", content: `{"tool": "${call.toolName}", "args": ${JSON.stringify(call.args)}}` });
+                    messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was not approved. Reason: ${reason}` });
+                    continue;
+                }
+
                 loopTracker.record(call.toolName, call.args);
 
-                let toolResult = await registry!.executeTool(call.toolName, call.args);
+                await fireHook("onToolStart", { toolName: call.toolName, args: call.args, toolCallId: callId });
+                emit("tool_started", { name: call.toolName, callId, args: call.args });
+                let toolResult = await registry!.executeTool(
+                    call.toolName,
+                    call.args,
+                    runContext as RunContext<unknown>,
+                );
                 state.toolCalls++;
+                await fireHook("onToolEnd", { toolName: call.toolName, args: call.args, result: toolResult, toolCallId: callId });
 
                 // External post_tool_use hook
                 if (extHookRunner) {
@@ -1696,6 +2024,45 @@ export async function runAgentGraph(
                     }
                 }
 
+                // ── Per-call approval (sticky via RunContext) — parallel ─────
+                if (approvalHandler) {
+                    const gated: import("../tools/registry.js").ParsedToolCall[] = [];
+                    for (let idx = 0; idx < approvedCalls.length; idx++) {
+                        const call = approvedCalls[idx]!;
+                        const ntc = nativeToolCallObjects[idx];
+                        const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${call.toolName}`;
+                        let approved = runContext.isToolApproved(callId, { toolName: call.toolName });
+                        if (approved === undefined) {
+                            try {
+                                const record = await approvalHandler({
+                                    toolName: call.toolName,
+                                    toolCallId: callId,
+                                    args: call.args,
+                                    runContext: runContext as RunContext<unknown>,
+                                });
+                                if (record) {
+                                    if (record.approved) runContext.approveTool(callId, { always: record.always, toolName: call.toolName });
+                                    else runContext.rejectTool(callId, { always: record.always, toolName: call.toolName, reason: record.reason });
+                                    approved = record.approved;
+                                }
+                            } catch (apprErr) { emit("warn", { message: `approvalHandler error: ${apprErr}` }); }
+                        }
+                        if (approved === false) {
+                            const reason = runContext.getApproval(callId, { toolName: call.toolName })?.reason ?? "approval not granted";
+                            emit("tool_skipped", { name: call.toolName, reason });
+                            messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was not approved. Reason: ${reason}` });
+                            continue;
+                        }
+                        if (approved === undefined) {
+                            emit("approval_required", { name: call.toolName, callId, args: call.args });
+                            messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} requires approval but none was granted.` });
+                            continue;
+                        }
+                        gated.push(call);
+                    }
+                    approvedCalls = gated;
+                }
+
                 if (approvedCalls.length === 0) {
                     messages.push({ role: "user", content: "[All tools were rejected by approval hook]" });
                     continue;
@@ -1703,8 +2070,28 @@ export async function runAgentGraph(
 
                 loopTracker.recordBatch(approvedCalls);
 
-                const results = await registry!.executeToolsParallel(approvedCalls);
+                // onToolStart for each approved call
+                for (let idx = 0; idx < approvedCalls.length; idx++) {
+                    const call = approvedCalls[idx]!;
+                    const ntc = nativeToolCallObjects[idx];
+                    const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${call.toolName}`;
+                    await fireHook("onToolStart", { toolName: call.toolName, args: call.args, toolCallId: callId });
+                    emit("tool_started", { name: call.toolName, callId, args: call.args });
+                }
+
+                const results = await registry!.executeToolsParallel(
+                    approvedCalls,
+                    runContext as RunContext<unknown>,
+                );
                 state.toolCalls += approvedCalls.length;
+
+                // onToolEnd for each approved call
+                for (let idx = 0; idx < approvedCalls.length; idx++) {
+                    const call = approvedCalls[idx]!;
+                    const ntc = nativeToolCallObjects[idx];
+                    const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${call.toolName}`;
+                    await fireHook("onToolEnd", { toolName: call.toolName, args: call.args, result: results[idx], toolCallId: callId });
+                }
 
                 const callSummaries: string[] = [];
                 const toolOutputs: string[] = [];
@@ -1929,6 +2316,77 @@ export async function runAgentGraph(
             }
         } catch { /* best effort */ }
     }
+
+    // ── Output guardrails ────────────────────────────────────────────
+    if (!inputGuardrailRejected && outputGuardrails.length > 0 && state.result) {
+        for (const gr of outputGuardrails) {
+            let result;
+            try {
+                result = await (gr as OutputGuardrail<TContext>).run(runContext, state.result);
+            } catch (grErr) {
+                emit("warn", { message: `output guardrail '${gr.name}' threw: ${grErr}` });
+                continue;
+            }
+            if (result.behavior === GuardrailBehavior.ALLOW) continue;
+            emit("guardrail_tripped", {
+                source: "output",
+                guardrail: gr.name,
+                behavior: result.behavior,
+                message: result.message,
+            });
+            state.guardrailTripped = {
+                source: "output",
+                guardrail: gr.name,
+                behavior: result.behavior,
+                message: result.message,
+            };
+            if (result.behavior === GuardrailBehavior.REJECT_CONTENT) {
+                state.result = result.replacementOutput
+                    ?? result.message
+                    ?? `Output rejected by guardrail '${gr.name}'.`;
+                break;
+            }
+            if (result.behavior === GuardrailBehavior.RAISE_EXCEPTION) {
+                await fireHook("onAgentEnd", { result: state.result });
+                await fireHook("onRunEnd", { state });
+                throw new GuardrailTripwireTriggered(gr.name, "output", result);
+            }
+        }
+    }
+
+    // ── Structured output parsing (outputType) ─────────────────────
+    if (outputType && state.status === "done" && state.result) {
+        try {
+            if (typeof outputType === "function") {
+                state.finalOutput = outputType(state.result);
+            } else if (typeof (outputType as any).safeParse === "function") {
+                // Try to JSON.parse first; pass raw string through if parse fails.
+                let candidate: unknown = state.result;
+                try { candidate = JSON.parse(state.result); } catch { /* fallthrough */ }
+                const parsed = (outputType as { safeParse(v: unknown): { success: true; data: unknown } | { success: false; error: unknown } }).safeParse(candidate);
+                if (parsed.success) state.finalOutput = parsed.data;
+                else emit("warn", { message: `outputType.safeParse failed: ${String((parsed as { error: unknown }).error)}` });
+            }
+            if (state.finalOutput !== undefined) {
+                emit("final_output", { finalOutput: state.finalOutput });
+            }
+        } catch (err) {
+            emit("warn", { message: `outputType parse error: ${err}` });
+        }
+    }
+
+    // ── Session backend persistence (final flush) ─────────────────
+    if (sessionBackend) {
+        try {
+            const newItems = messages.slice(sessionStartCursor);
+            if (newItems.length > 0) await sessionBackend.addItems(newItems);
+        } catch (err) {
+            emit("warn", { message: `session persistence failed: ${err}` });
+        }
+    }
+
+    await fireHook("onAgentEnd", { result: state.result });
+    await fireHook("onRunEnd", { state });
 
     emit("agent_done", {
         tool_calls: state.toolCalls,

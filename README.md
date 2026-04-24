@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.0.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.2.0**
 
 ## Installation
 
@@ -539,6 +539,54 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_HOOK_POST_LLM` | Shell command after each LLM response. Fire-and-forget logging. |
 
 ## Changelog
+
+### v6.2.0 — OpenAI-Agents Parity, Ollama/Gemma4 First-Class Routing, 63 Model Profiles
+
+Additive release — mirrors the Python sibling [clawagents (PyPI)](https://pypi.org/project/clawagents/). Everything is backward compatible.
+
+**1. Ten OpenAI-Agents-SDK parity surfaces** (all additive, all new modules)
+
+| Surface | Module | What it adds |
+|:---|:---|:---|
+| **Run Context** | `src/run-context.ts` | `RunContext` carries per-run state, approvals, and user data through hooks and tools. |
+| **Usage Tracking** | `src/usage.ts` | `Usage` + `RequestUsage` aggregate token/latency stats across turns, providers, and sub-agents. |
+| **Lifecycle Hooks** | `src/lifecycle.ts` | `RunHooks` / `AgentHooks` with typed `LLMStart/LLMEnd/ToolStart/ToolEnd/AgentStart/AgentEnd/RunStart/RunEnd/Handoff` payloads. `compositeHooks` chains multiple observers. |
+| **Guardrails** | `src/guardrails.ts` | `inputGuardrail` / `outputGuardrail` decorators, `GuardrailTripwireTriggered`, behavior modes (raise / log / filter). |
+| **Stream Events** | `src/stream-events.ts` | First-class `TurnStartedEvent`, `AssistantDeltaEvent`, `ToolCallPlannedEvent`, `ApprovalRequiredEvent`, `UsageEvent`, `GuardrailTrippedEvent`, `FinalOutputEvent`, `ErrorStreamEvent`. |
+| **Retry Policy** | `src/retry.ts` | `RetryPolicy` + `DEFAULT_RETRY_POLICY`. Exponential backoff with jitter, per-error-class overrides. |
+| **Function Tools** | `src/function-tool.ts` | `functionTool()` helper auto-derives JSON Schema from Zod schemas — zero hand-written schemas. |
+| **Session Backends** | `src/session/backends.ts` | Unified `Session` interface with `InMemorySession`, `JsonlFileSession`, `SqliteSession` (uses `node:sqlite`). |
+| **Structured Outputs** | `OutputTypeSpec` | Return typed objects via Zod schema or JSON schema. Validated before the run finalizes. |
+| **Tool Approval** | `ApprovalHandler` | HITL gate — async callback returns allow/deny/redirect per tool call. Integrates with `ApprovalRequiredEvent`. |
+
+**2. Ollama & Gemma 4 first-class routing**
+
+`createProvider()` now auto-routes 24 Ollama-family prefixes to `http://localhost:11434/v1` with no config. Use either the bare tag (`gemma4:e4b`) or the explicit routing form (`ollama/gemma4:e4b`).
+
+| Family | Examples | Routed to |
+|:---|:---|:---|
+| **Gemma 4** | `gemma4`, `gemma4:e2b`, `gemma4:e4b`, `gemma4:26b`, `gemma4:31b` | Ollama @ :11434/v1 |
+| **Gemma 3 / 3n / 2** | `gemma3`, `gemma3n:e4b`, `gemma2`, `gemma` | Ollama @ :11434/v1 |
+| **Llama / Qwen / Mistral / Phi / Deepseek / Codellama** | `llama3`, `qwen2`, `mistral`, `mixtral`, `phi4`, `deepseek-r1`, `codellama`, … | Ollama @ :11434/v1 |
+| **Explicit routing** | `ollama/<any-tag>` | Ollama @ :11434/v1 (prefix stripped) |
+
+Override with `OPENAI_BASE_URL` if Ollama runs on a different host/port. API key auto-set to placeholder `"ollama"`.
+
+**3. 63 model profiles + model-aware context budget**
+
+`MODEL_PROFILES` now covers frontier (GPT-5.4 → 400K, Gemini 3.1 → 1M, Claude 4.6 Opus), Ollama (Gemma4 e2b/e4b → 128K, 26b/31b → 256K), and a long tail of OSS variants. `resolveContextBudget()` walks insertion order for deterministic prefix matching (most-specific first) — identical to the Python sibling.
+
+**4. Cross-package parity** — the Python sibling [`clawagents` on PyPI](https://pypi.org/project/clawagents/) has the identical 24-entry Ollama prefix list, 63-entry model profile table with the same (window, ratio) values, and the same `create_provider` routing logic.
+
+**5. Quality / debug pass**
+
+- Hardened filesystem sandbox — all six fs tools now resolve paths inside `try/catch`, so `Path traversal blocked` errors become graceful `ToolResult { success: false }` instead of thrown exceptions.
+- Ported `tests/openai_agents_surfaces.test.ts` — full coverage for RunContext, Usage, Hooks, Guardrails, StreamEvents, Retry, FunctionTool, Session backends.
+- Added `scripts/smoke-gemma4.ts` — manual routing probe for Gemma4 variants + `gpt-5.4`.
+- Test suite: **109 passed** via `node --test`.
+
+**New public exports** (from `clawagents`):
+`RunContext`, `ApprovalRecord`, `Usage`, `RequestUsage`, `RunHooks`, `AgentHooks`, `compositeHooks`, `InputGuardrail`, `OutputGuardrail`, `inputGuardrail`, `outputGuardrail`, `GuardrailBehavior`, `GuardrailResult`, `GuardrailTripwireTriggered`, `StreamEvent` (+ 10 concrete event types), `streamEventFromKind`, `RetryPolicy`, `DEFAULT_RETRY_POLICY`, `functionTool`, `InMemorySession`, `JsonlFileSession`, `SqliteSession`.
 
 ### v6.1.1 — Credential Isolation & Lazy Tool Provisioning
 

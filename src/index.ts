@@ -18,7 +18,37 @@ import { detectChannels } from "./channels/auto.js";
 
 // Re-export public API
 export { createClawAgent, ClawAgent, LangChainToolAdapter } from "./agent.js";
-export type { AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult } from "./graph/agent-loop.js";
+export type {
+    AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult,
+    AgentLoopExtras, OnStreamEvent, ApprovalHandler, OutputTypeSpec,
+} from "./graph/agent-loop.js";
+
+// ── openai-agents-python parity surfaces ─────────────────────────────
+export { RunContext } from "./run-context.js";
+export type { ApprovalRecord } from "./run-context.js";
+export { Usage, RequestUsage } from "./usage.js";
+export type {
+    StreamEvent, TurnStartedEvent, AssistantTextEvent, AssistantDeltaEvent,
+    ToolCallPlannedEvent, ToolStartedEvent, ToolResultEvent, UsageEvent,
+    GuardrailTrippedEvent, FinalOutputEvent, ErrorStreamEvent,
+    ApprovalRequiredEvent, GenericStreamEvent,
+} from "./stream-events.js";
+export { streamEventFromKind } from "./stream-events.js";
+export { RetryPolicy, DEFAULT_RETRY_POLICY } from "./retry.js";
+export { RunHooks, AgentHooks, compositeHooks } from "./lifecycle.js";
+export type {
+    LifecyclePayload, LLMStartPayload, LLMEndPayload, ToolStartPayload, ToolEndPayload,
+    AgentStartPayload, AgentEndPayload, RunStartPayload, RunEndPayload, HandoffPayload,
+} from "./lifecycle.js";
+export {
+    GuardrailBehavior, GuardrailResult, GuardrailTripwireTriggered,
+    InputGuardrail, OutputGuardrail, inputGuardrail, outputGuardrail,
+} from "./guardrails.js";
+export type { InputGuardrailFn, OutputGuardrailFn } from "./guardrails.js";
+export { functionTool, createTool } from "./function-tool.js";
+export type { FunctionToolOptions, CreateToolOptions, FunctionToolParamSpec, JsonSchemaType } from "./function-tool.js";
+export { InMemorySession, JsonlFileSession, SqliteSession } from "./session/backends.js";
+export type { Session } from "./session/backends.js";
 export type { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
 export { ResultCacheManager } from "./tools/cache.js";
 export { validateToolArgs, formatValidationErrors } from "./tools/validate.js";

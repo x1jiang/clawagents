@@ -24,7 +24,19 @@ export interface Tool {
     name: string;
     description: string;
     parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>;
-    execute(args: Record<string, unknown>): Promise<ToolResult>;
+    /**
+     * Execute the tool with the given arguments.
+     *
+     * Tools that want access to the typed user context, live token usage,
+     * or the per-call approval store can declare a second parameter; the
+     * loop will pass a {@link RunContext} through when available. Keeping
+     * the parameter optional preserves backward compatibility with tools
+     * that only care about `args`.
+     */
+    execute(
+        args: Record<string, unknown>,
+        runContext?: import("../run-context.js").RunContext<unknown>,
+    ): Promise<ToolResult>;
     /** When true, results are cached by (name, args) with a configurable TTL. */
     cacheable?: boolean;
 }
@@ -56,12 +68,15 @@ export class LazyFactoryTool implements Tool {
         this._factory = factory;
     }
 
-    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    async execute(
+        args: Record<string, unknown>,
+        runContext?: import("../run-context.js").RunContext<unknown>,
+    ): Promise<ToolResult> {
         if (!this._resolved) {
             this._resolved = await this._factory!();
             this._factory = null;
         }
-        return this._resolved.execute(args);
+        return this._resolved.execute(args, runContext);
     }
 }
 
@@ -136,7 +151,10 @@ export class LazyTool implements Tool {
         private readonly className: string,
     ) {}
 
-    async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    async execute(
+        args: Record<string, unknown>,
+        runContext?: import("../run-context.js").RunContext<unknown>,
+    ): Promise<ToolResult> {
         if (!this._resolved) {
             // Dynamic import using the module path (relative or absolute)
             const mod = await import(this.modulePath);
@@ -146,7 +164,7 @@ export class LazyTool implements Tool {
             }
             this._resolved = new Cls() as Tool;
         }
-        return this._resolved.execute(args);
+        return this._resolved.execute(args, runContext);
     }
 }
 
@@ -283,7 +301,11 @@ export class ToolRegistry {
         return [];
     }
 
-    async executeTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    async executeTool(
+        toolName: string,
+        args: Record<string, unknown>,
+        runContext?: import("../run-context.js").RunContext<unknown>,
+    ): Promise<ToolResult> {
         const tool = this.get(toolName);
         if (!tool) {
             return { success: false, output: "", error: `Unknown tool: ${toolName}` };
@@ -315,7 +337,7 @@ export class ToolRegistry {
             snapshotBeforeWrite(toolName, effectiveArgs);
 
             const result = await Promise.race([
-                tool.execute(effectiveArgs),
+                tool.execute(effectiveArgs, runContext),
                 new Promise<never>((_, reject) => {
                     timer = setTimeout(() => reject(new Error(
                         `Tool "${toolName}" timed out after ${this._toolTimeoutMs / 1000}s. ` +
@@ -338,12 +360,15 @@ export class ToolRegistry {
         }
     }
 
-    async executeToolsParallel(calls: ParsedToolCall[]): Promise<ToolResult[]> {
+    async executeToolsParallel(
+        calls: ParsedToolCall[],
+        runContext?: import("../run-context.js").RunContext<unknown>,
+    ): Promise<ToolResult[]> {
         if (calls.length === 0) return [];
-        if (calls.length === 1) return [await this.executeTool(calls[0].toolName, calls[0].args)];
+        if (calls.length === 1) return [await this.executeTool(calls[0].toolName, calls[0].args, runContext)];
 
         const settled = await Promise.allSettled(
-            calls.map((call) => this.executeTool(call.toolName, call.args)),
+            calls.map((call) => this.executeTool(call.toolName, call.args, runContext)),
         );
 
         return settled.map((result) =>

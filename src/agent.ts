@@ -3,6 +3,7 @@ import { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
 import {
     runAgentGraph, AgentState, OnEvent,
     BeforeLLMHook, BeforeToolHook, AfterToolHook,
+    AgentLoopExtras,
 } from "./graph/agent-loop.js";
 import type { LLMMessage } from "./providers/llm.js";
 import { existsSync, statSync } from "node:fs";
@@ -151,14 +152,15 @@ export class ClawAgent {
      * @param onEvent - (Optional) runtime stream callback to track the status changes
      * @param features - (Optional) dictionary matching process.env CLAW_FEATURE flags to override
      */
-    async invoke(
+    async invoke<TContext = unknown>(
         task: string,
         maxIterations?: number,
         onEvent?: OnEvent,
         timeoutS?: number,
-        features?: Record<string, boolean>
+        features?: Record<string, boolean>,
+        extras?: AgentLoopExtras<TContext>,
     ): Promise<AgentState> {
-        return await runAgentGraph(
+        return await runAgentGraph<TContext>(
             task,
             this.llm,
             this.tools,
@@ -180,6 +182,7 @@ export class ClawAgent {
             features ?? this.features,
             this.advisorLLM,
             this.advisorMaxCalls,
+            extras,
         );
     }
 

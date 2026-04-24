@@ -20,6 +20,26 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+/**
+ * Build a fresh set of filesystem tools scoped to `root`. The default module
+ * singleton is pinned to the workspace cwd for safety (LLMs shouldn't write
+ * outside the project), so per-test tmp dirs need their own backend.
+ */
+async function sandboxedFs(root: string): Promise<{
+    lsTool: import("./tools/registry.js").Tool;
+    readFileTool: import("./tools/registry.js").Tool;
+    writeFileTool: import("./tools/registry.js").Tool;
+    editFileTool: import("./tools/registry.js").Tool;
+    grepTool: import("./tools/registry.js").Tool;
+    globTool: import("./tools/registry.js").Tool;
+}> {
+    const { createFilesystemTools } = await import("./tools/filesystem.js");
+    const { LocalBackend } = await import("./sandbox/local.js");
+    const [lsTool, readFileTool, writeFileTool, editFileTool, grepTool, globTool] =
+        createFilesystemTools(new LocalBackend(root));
+    return { lsTool: lsTool!, readFileTool: readFileTool!, writeFileTool: writeFileTool!, editFileTool: editFileTool!, grepTool: grepTool!, globTool: globTool! };
+}
+
 // ─── ls ──────────────────────────────────────────────────────────────────
 
 describe("lsTool", () => {
@@ -35,7 +55,7 @@ describe("lsTool", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("shows metadata", async () => {
-        const { lsTool } = await import("./tools/filesystem.js");
+        const { lsTool } = await sandboxedFs(tmp);
         const result = await lsTool.execute({ path: tmp });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("[DIR]"));
@@ -45,21 +65,21 @@ describe("lsTool", () => {
     });
 
     it("dirs appear first", async () => {
-        const { lsTool } = await import("./tools/filesystem.js");
+        const { lsTool } = await sandboxedFs(tmp);
         const result = await lsTool.execute({ path: tmp });
         const lines = (result.output as string).split("\n");
         assert.ok(lines[0].includes("[DIR]"));
     });
 
     it("handles empty directory", async () => {
-        const { lsTool } = await import("./tools/filesystem.js");
+        const { lsTool } = await sandboxedFs(tmp);
         const result = await lsTool.execute({ path: join(tmp, "subdir") });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("(empty directory)"));
     });
 
     it("fails for nonexistent path", async () => {
-        const { lsTool } = await import("./tools/filesystem.js");
+        const { lsTool } = await sandboxedFs(tmp);
         const result = await lsTool.execute({ path: "/nonexistent/path" });
         assert.equal(result.success, false);
     });
@@ -81,7 +101,7 @@ describe("readFileTool", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("reads file with line numbers", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const result = await readFileTool.execute({ path: filePath });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("Line 1"));
@@ -89,7 +109,7 @@ describe("readFileTool", () => {
     });
 
     it("supports pagination", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const result = await readFileTool.execute({ path: filePath, offset: 10, limit: 5 });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("Line 11"));
@@ -97,7 +117,7 @@ describe("readFileTool", () => {
     });
 
     it("fails for missing file", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const result = await readFileTool.execute({ path: "/nonexistent/file.txt" });
         assert.equal(result.success, false);
     });
@@ -115,7 +135,7 @@ describe("writeFileTool", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("creates new file", async () => {
-        const { writeFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "new.txt");
         const result = await writeFileTool.execute({ path, content: "Hello world!" });
         assert.equal(result.success, true);
@@ -123,7 +143,7 @@ describe("writeFileTool", () => {
     });
 
     it("creates nested directories", async () => {
-        const { writeFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "a", "b", "c", "deep.txt");
         const result = await writeFileTool.execute({ path, content: "nested!" });
         assert.equal(result.success, true);
@@ -131,7 +151,7 @@ describe("writeFileTool", () => {
     });
 
     it("overwrites existing file", async () => {
-        const { writeFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "overwrite.txt");
         await writeFileTool.execute({ path, content: "first" });
         await writeFileTool.execute({ path, content: "second" });
@@ -154,7 +174,7 @@ describe("editFileTool", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("replaces single occurrence", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const result = await editFileTool.execute({
             path: filePath,
             target: "Foo Bar",
@@ -167,7 +187,7 @@ describe("editFileTool", () => {
     });
 
     it("fails on non-unique target", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const result = await editFileTool.execute({
             path: filePath,
             target: "Hello World",
@@ -178,7 +198,7 @@ describe("editFileTool", () => {
     });
 
     it("replace_all works", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const result = await editFileTool.execute({
             path: filePath,
             target: "Hello World",
@@ -192,7 +212,7 @@ describe("editFileTool", () => {
     });
 
     it("fails for missing target text", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const result = await editFileTool.execute({
             path: filePath,
             target: "NONEXISTENT",
@@ -202,7 +222,7 @@ describe("editFileTool", () => {
     });
 
     it("fails for missing file", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const result = await editFileTool.execute({
             path: "/nonexistent/file.txt",
             target: "x",
@@ -228,7 +248,7 @@ describe("grepTool", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("searches single file", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const result = await grepTool.execute({
             path: join(tmp, "README.md"),
             pattern: "TODO",
@@ -239,7 +259,7 @@ describe("grepTool", () => {
     });
 
     it("searches directory recursively", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const result = await grepTool.execute({
             path: tmp,
             pattern: "TODO",
@@ -250,7 +270,7 @@ describe("grepTool", () => {
     });
 
     it("filters by glob", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const result = await grepTool.execute({
             path: tmp,
             pattern: "TODO",
@@ -263,7 +283,7 @@ describe("grepTool", () => {
     });
 
     it("reports no matches", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const result = await grepTool.execute({
             path: tmp,
             pattern: "ZZZZNONEXISTENT",
@@ -290,7 +310,7 @@ describe("globTool", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("finds py files recursively", async () => {
-        const { globTool } = await import("./tools/filesystem.js");
+        const { globTool } = await sandboxedFs(tmp);
         const result = await globTool.execute({ pattern: "**/*.py", path: tmp });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("main.py"));
@@ -298,14 +318,14 @@ describe("globTool", () => {
     });
 
     it("finds md files non-recursively", async () => {
-        const { globTool } = await import("./tools/filesystem.js");
+        const { globTool } = await sandboxedFs(tmp);
         const result = await globTool.execute({ pattern: "*.md", path: tmp });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("README.md"));
     });
 
     it("reports no matches", async () => {
-        const { globTool } = await import("./tools/filesystem.js");
+        const { globTool } = await sandboxedFs(tmp);
         const result = await globTool.execute({ pattern: "**/*.xyz", path: tmp });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("No files"));

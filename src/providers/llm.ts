@@ -921,9 +921,51 @@ export class AnthropicProvider implements LLMProvider {
 // ─── Factory ──────────────────────────────────────────────────────────────
 
 /**
+ * Prefixes that indicate a model is served by Ollama's OpenAI-compatible
+ * endpoint (http://localhost:11434/v1). Matching is case-insensitive.
+ * Users can always force-route by prefixing with `ollama/`.
+ */
+const OLLAMA_PREFIXES: readonly string[] = [
+    "ollama/",
+    "gemma4:",
+    "gemma3n:",
+    "gemma3:",
+    "gemma2:",
+    "gemma:",
+    "gemma4",
+    "gemma3n",
+    "gemma3",
+    "gemma2",
+    "gemma",
+    "llama3",
+    "llama2",
+    "llama",
+    "qwen2",
+    "qwen",
+    "mistral",
+    "mixtral",
+    "phi4",
+    "phi3",
+    "phi",
+    "deepseek-r1",
+    "deepseek",
+    "codellama",
+];
+const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1";
+
+/** Return true if *modelName* looks like an Ollama/local model tag. */
+function looksLikeOllama(modelName: string): boolean {
+    const lower = modelName.toLowerCase();
+    return OLLAMA_PREFIXES.some((p) => lower.startsWith(p));
+}
+
+/**
  * Create a single LLM provider. The provider is inferred from the model name:
- * names starting with "gemini" → GeminiProvider, "claude"/"anthropic" → AnthropicProvider,
- * everything else → OpenAIProvider.
+ * - names starting with "gemini" → GeminiProvider
+ * - names starting with "claude"/"anthropic" → AnthropicProvider
+ * - names matching an Ollama prefix (or "ollama/<tag>") → OpenAIProvider
+ *   pointed at Ollama's /v1 endpoint
+ * - everything else → OpenAIProvider (OpenAI or user-configured base URL)
  */
 export async function createProvider(modelName: string, config: EngineConfig): Promise<LLMProvider> {
     const lower = modelName.toLowerCase();
@@ -942,6 +984,15 @@ export async function createProvider(modelName: string, config: EngineConfig): P
         }
         config.anthropicModel = modelName;
         return new AnthropicProvider(config, AnthropicClass);
+    }
+    if (looksLikeOllama(modelName)) {
+        // Strip the explicit `ollama/` routing prefix; Ollama serves the bare tag.
+        const tag = lower.startsWith("ollama/") ? modelName.slice("ollama/".length) : modelName;
+        if (!config.openaiBaseUrl) config.openaiBaseUrl = OLLAMA_DEFAULT_BASE_URL;
+        // Ollama ignores the API key, but the OpenAI client refuses an empty string.
+        if (!config.openaiApiKey) config.openaiApiKey = "ollama";
+        config.openaiModel = tag;
+        return new OpenAIProvider(config);
     }
     config.openaiModel = modelName;
     return new OpenAIProvider(config);

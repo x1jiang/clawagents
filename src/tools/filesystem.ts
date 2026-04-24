@@ -39,8 +39,8 @@ function createLsTool(sb: SandboxBackend): Tool {
             path: { type: "string", description: "Path to list. Default: current directory", required: true },
         },
         async execute(args): Promise<ToolResult> {
-            const targetPath = sb.safePath(String(args["path"] ?? "."));
             try {
+                const targetPath = sb.safePath(String(args["path"] ?? "."));
                 const entries = await sb.readDir(targetPath);
                 const sorted = entries.sort((a, b) => {
                     if (a.isDirectory && !b.isDirectory) return -1;
@@ -82,8 +82,8 @@ function createReadFileTool(sb: SandboxBackend): Tool {
             limit: { type: "number", description: "Max lines to return. Default: 100" },
         },
         async execute(args): Promise<ToolResult> {
-            const filePath = sb.safePath(String(args["path"] ?? ""));
             try {
+                const filePath = sb.safePath(String(args["path"] ?? ""));
                 const ext = filePath.split(".").pop()?.toLowerCase();
                 const isImage = ["png", "jpg", "jpeg", "webp"].includes(ext || "");
 
@@ -129,9 +129,9 @@ function createWriteFileTool(sb: SandboxBackend): Tool {
             content: { type: "string", description: "Content to write to the file", required: true },
         },
         async execute(args): Promise<ToolResult> {
-            const filePath = sb.safePath(String(args["path"] ?? ""));
             const content = String(args["content"] ?? "");
             try {
+                const filePath = sb.safePath(String(args["path"] ?? ""));
                 const dir = sb.dirname(filePath);
                 if (!(await sb.exists(dir))) {
                     await sb.mkdir(dir, true);
@@ -156,12 +156,12 @@ function createEditFileTool(sb: SandboxBackend): Tool {
             replace_all: { type: "boolean", description: "Replace all occurrences (default: false, requires unique match)" },
         },
         async execute(args): Promise<ToolResult> {
-            const filePath = sb.safePath(String(args["path"] ?? ""));
             const target = String(args["target"] ?? "");
             const replacement = String(args["replacement"] ?? "");
             const replaceAll = Boolean(args["replace_all"] ?? false);
 
             try {
+                const filePath = sb.safePath(String(args["path"] ?? ""));
                 if (!(await sb.exists(filePath))) {
                     return { success: false, output: "", error: `edit_file failed: File does not exist at ${filePath}` };
                 }
@@ -226,7 +226,6 @@ function createGrepTool(sb: SandboxBackend): Tool {
             recursive: { type: "boolean", description: "Search recursively in subdirectories. Default: false" },
         },
         async execute(args): Promise<ToolResult> {
-            const target = sb.safePath(String(args["path"] ?? ""));
             const pattern = String(args["pattern"] ?? "");
             const globFilter = String(args["glob_filter"] ?? "*");
             const recursive = Boolean(args["recursive"] ?? false);
@@ -236,6 +235,7 @@ function createGrepTool(sb: SandboxBackend): Tool {
             }
 
             try {
+                const target = sb.safePath(String(args["path"] ?? ""));
                 const targetStat = await sb.stat(target).catch(() => null);
 
                 if (targetStat?.isFile) {
@@ -305,7 +305,6 @@ function createGlobTool(sb: SandboxBackend): Tool {
             path: { type: "string", description: "Root directory to search from. Default: current directory" },
         },
         async execute(args): Promise<ToolResult> {
-            const root = sb.safePath(String(args["path"] ?? "."));
             const pattern = String(args["pattern"] ?? "");
 
             if (!pattern) {
@@ -313,6 +312,7 @@ function createGlobTool(sb: SandboxBackend): Tool {
             }
 
             try {
+                const root = sb.safePath(String(args["path"] ?? "."));
                 const rootStat = await sb.stat(root).catch(() => null);
                 if (!rootStat?.isDirectory) {
                     return { success: false, output: "", error: `Directory does not exist: ${root}` };
@@ -368,7 +368,8 @@ export function createFilesystemTools(backend: SandboxBackend): Tool[] {
 }
 
 /** Default tools using LocalBackend (backward compatible). */
-export const filesystemTools: Tool[] = createFilesystemTools(new LocalBackend());
+const _defaultBackend = new LocalBackend();
+export const filesystemTools: Tool[] = createFilesystemTools(_defaultBackend);
 
 // Backward-compatible named exports for tests and external consumers
 export const lsTool: Tool = filesystemTools[0]!;

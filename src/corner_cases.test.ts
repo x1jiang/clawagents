@@ -13,6 +13,26 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+/**
+ * Build a fresh set of filesystem tools scoped to `root`. The default module
+ * singleton is pinned to the workspace cwd for safety (LLMs shouldn't write
+ * outside the project), so per-test tmp dirs need their own backend.
+ */
+async function sandboxedFs(root: string): Promise<{
+    lsTool: import("./tools/registry.js").Tool;
+    readFileTool: import("./tools/registry.js").Tool;
+    writeFileTool: import("./tools/registry.js").Tool;
+    editFileTool: import("./tools/registry.js").Tool;
+    grepTool: import("./tools/registry.js").Tool;
+    globTool: import("./tools/registry.js").Tool;
+}> {
+    const { createFilesystemTools } = await import("./tools/filesystem.js");
+    const { LocalBackend } = await import("./sandbox/local.js");
+    const [lsTool, readFileTool, writeFileTool, editFileTool, grepTool, globTool] =
+        createFilesystemTools(new LocalBackend(root));
+    return { lsTool: lsTool!, readFileTool: readFileTool!, writeFileTool: writeFileTool!, editFileTool: editFileTool!, grepTool: grepTool!, globTool: globTool! };
+}
+
 // ─── Unicode / Special Characters ────────────────────────────────────────
 
 describe("unicode content", () => {
@@ -21,7 +41,7 @@ describe("unicode content", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("write and read unicode", async () => {
-        const { writeFileTool, readFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool, readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "unicode.txt");
         const content = "Hello 世界! 🎉 résumé über naïve";
 
@@ -33,7 +53,7 @@ describe("unicode content", () => {
     });
 
     it("edit unicode target", async () => {
-        const { writeFileTool, editFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool, editFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "edit_u.txt");
         await writeFileTool.execute({ path, content: "Hello 世界" });
 
@@ -43,7 +63,7 @@ describe("unicode content", () => {
     });
 
     it("grep unicode pattern", async () => {
-        const { writeFileTool, grepTool } = await import("./tools/filesystem.js");
+        const { writeFileTool, grepTool } = await sandboxedFs(tmp);
         const path = join(tmp, "grep_u.txt");
         await writeFileTool.execute({ path, content: "Line 1\n函数定义\nLine 3\n" });
 
@@ -60,7 +80,7 @@ describe("special filenames", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("file with spaces", async () => {
-        const { writeFileTool, readFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool, readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "file with spaces.txt");
         await writeFileTool.execute({ path, content: "spaced" });
         const r = await readFileTool.execute({ path });
@@ -68,14 +88,14 @@ describe("special filenames", () => {
     });
 
     it("dotfile visible in ls", async () => {
-        const { writeFileTool, lsTool } = await import("./tools/filesystem.js");
+        const { writeFileTool, lsTool } = await sandboxedFs(tmp);
         await writeFileTool.execute({ path: join(tmp, ".hidden"), content: "secret" });
         const r = await lsTool.execute({ path: tmp });
         assert.ok(r.output.includes(".hidden"));
     });
 
     it("deeply nested path", async () => {
-        const { writeFileTool, readFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool, readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "a", "b", "c", "d", "e", "deep.txt");
         await writeFileTool.execute({ path, content: "deep!" });
         const r = await readFileTool.execute({ path });
@@ -91,7 +111,7 @@ describe("boundary conditions", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("read empty file", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "empty.txt");
         writeFileSync(path, "");
         const r = await readFileTool.execute({ path });
@@ -99,7 +119,7 @@ describe("boundary conditions", () => {
     });
 
     it("read single-line file", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "one.txt");
         writeFileSync(path, "only line");
         const r = await readFileTool.execute({ path });
@@ -107,7 +127,7 @@ describe("boundary conditions", () => {
     });
 
     it("large file with pagination", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "large.txt");
         const lines = Array.from({ length: 10000 }, (_, i) => `Line ${i}: ${"x".repeat(80)}`);
         writeFileSync(path, lines.join("\n"));
@@ -117,14 +137,14 @@ describe("boundary conditions", () => {
     });
 
     it("write empty content", async () => {
-        const { writeFileTool } = await import("./tools/filesystem.js");
+        const { writeFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "empty_w.txt");
         const r = await writeFileTool.execute({ path, content: "" });
         assert.equal(r.success, true);
     });
 
     it("edit multiline target", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "multi.txt");
         writeFileSync(path, "line1\nline2\nline3\n");
         const r = await editFileTool.execute({ path, target: "line1\nline2", replacement: "REPLACED" });
@@ -133,7 +153,7 @@ describe("boundary conditions", () => {
     });
 
     it("offset beyond file length", async () => {
-        const { readFileTool } = await import("./tools/filesystem.js");
+        const { readFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "short.txt");
         writeFileSync(path, "two\nlines\n");
         const r = await readFileTool.execute({ path, offset: 100, limit: 10 });
@@ -141,7 +161,7 @@ describe("boundary conditions", () => {
     });
 
     it("ls on file (not dir) fails", async () => {
-        const { lsTool } = await import("./tools/filesystem.js");
+        const { lsTool } = await sandboxedFs(tmp);
         const path = join(tmp, "notadir.txt");
         writeFileSync(path, "x");
         const r = await lsTool.execute({ path });
@@ -149,7 +169,7 @@ describe("boundary conditions", () => {
     });
 
     it("grep empty pattern fails", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const r = await grepTool.execute({ path: tmp, pattern: "" });
         assert.equal(r.success, false);
     });
@@ -163,7 +183,7 @@ describe("grep edge cases", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("handles regex special chars as literals", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const path = join(tmp, "special.txt");
         writeFileSync(path, "price $100.00\nfoo(bar)\n[brackets]\n");
 
@@ -175,7 +195,7 @@ describe("grep edge cases", () => {
     });
 
     it("case sensitive matching", async () => {
-        const { grepTool } = await import("./tools/filesystem.js");
+        const { grepTool } = await sandboxedFs(tmp);
         const path = join(tmp, "case.txt");
         writeFileSync(path, "Hello World\nhello world\nHELLO WORLD\n");
         const r = await grepTool.execute({ path, pattern: "Hello" });
@@ -191,7 +211,7 @@ describe("edit replace_all corner cases", () => {
     afterEach(() => rmSync(tmp, { recursive: true }));
 
     it("replaces consecutive occurrences", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "consec.txt");
         writeFileSync(path, "aaa");
         const r = await editFileTool.execute({ path, target: "a", replacement: "bb", replace_all: true });
@@ -200,7 +220,7 @@ describe("edit replace_all corner cases", () => {
     });
 
     it("replaces with empty string (deletion)", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "del.txt");
         writeFileSync(path, "keep DELETE keep");
         const r = await editFileTool.execute({ path, target: " DELETE ", replacement: " " });
@@ -209,7 +229,7 @@ describe("edit replace_all corner cases", () => {
     });
 
     it("no-op replace (target === replacement)", async () => {
-        const { editFileTool } = await import("./tools/filesystem.js");
+        const { editFileTool } = await sandboxedFs(tmp);
         const path = join(tmp, "noop.txt");
         writeFileSync(path, "same same same");
         const r = await editFileTool.execute({ path, target: "same", replacement: "same", replace_all: true });
