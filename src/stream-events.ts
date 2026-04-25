@@ -76,6 +76,14 @@ export interface GuardrailTrippedEvent extends BaseStreamEvent {
     message: string;
 }
 
+export interface HandoffOccurredEvent extends BaseStreamEvent {
+    kind: "handoff_occurred";
+    fromAgent: string;
+    toAgent: string;
+    toolName: string;
+    reason: string;
+}
+
 export interface FinalOutputEvent extends BaseStreamEvent {
     kind: "final_output";
     output: unknown;
@@ -102,6 +110,7 @@ export type StreamEvent =
     | ApprovalRequiredEvent
     | UsageEvent
     | GuardrailTrippedEvent
+    | HandoffOccurredEvent
     | FinalOutputEvent
     | ErrorStreamEvent
     | GenericStreamEvent;
@@ -185,6 +194,15 @@ export function streamEventFromKind(
                 where: str(data.where),
                 behavior: str(data.behavior),
                 message: str(data.message),
+            };
+        case "handoff_occurred":
+            return {
+                ...base,
+                kind,
+                fromAgent: str(data.fromAgent ?? data.from_agent),
+                toAgent: str(data.toAgent ?? data.to_agent),
+                toolName: str(data.toolName ?? data.tool_name),
+                reason: str(data.reason),
             };
         case "final_output":
             return { ...base, kind, output: data.output, raw: str(data.raw) };

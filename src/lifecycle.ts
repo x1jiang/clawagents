@@ -82,6 +82,57 @@ export interface HandoffPayload<TContext = unknown>
     toAgent: string;
 }
 
+// ── v6.4: extended hook payloads ────────────────────────────────────
+
+export interface PreCompactPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    messageCount: number;
+    tokenEstimate: number;
+}
+
+export interface PostCompactPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    messageCountAfter: number;
+    summary: string | null;
+}
+
+export interface SubagentStartPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    parentAgent: string;
+    subagentName: string;
+    task: string;
+}
+
+export interface SubagentEndPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    parentAgent: string;
+    subagentName: string;
+    output: unknown;
+}
+
+export interface UserPromptSubmitPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    prompt: string;
+}
+
+export interface SessionStartPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    sessionId: string;
+}
+
+export interface SessionEndPayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    sessionId: string;
+}
+
+export interface ToolFailurePayload<TContext = unknown>
+    extends LifecyclePayload<TContext> {
+    toolName: string;
+    args: Record<string, unknown>;
+    error: string;
+    toolCallId: string;
+}
+
 // ── Hook classes ────────────────────────────────────────────────────
 
 /**
@@ -101,6 +152,21 @@ export class RunHooks<TContext = unknown> {
     async onToolStart(_payload: ToolStartPayload<TContext>): Promise<void> {}
     async onToolEnd(_payload: ToolEndPayload<TContext>): Promise<void> {}
     async onHandoff(_payload: HandoffPayload<TContext>): Promise<void> {}
+
+    // v6.4: extended hook surface — additive, default-noop, kept in sync
+    // with `clawagents_py/src/clawagents/lifecycle.py`.
+    async onPreCompact(_payload: PreCompactPayload<TContext>): Promise<void> {}
+    async onPostCompact(_payload: PostCompactPayload<TContext>): Promise<void> {}
+    async onSubagentStart(_payload: SubagentStartPayload<TContext>): Promise<void> {}
+    async onSubagentEnd(_payload: SubagentEndPayload<TContext>): Promise<void> {}
+    async onUserPromptSubmit(_payload: UserPromptSubmitPayload<TContext>): Promise<void> {}
+    async onSessionStart(_payload: SessionStartPayload<TContext>): Promise<void> {}
+    async onSessionEnd(_payload: SessionEndPayload<TContext>): Promise<void> {}
+    /** Specialised handler for a tool that returned `success=false`. Still
+     *  receives `onToolEnd` (with `success=false`) too — this method exists
+     *  so observers can route failures to a separate sink without filtering
+     *  every `onToolEnd` call. */
+    async onToolFailure(_payload: ToolFailurePayload<TContext>): Promise<void> {}
 }
 
 /**
@@ -128,6 +194,12 @@ export function compositeHooks<TContext = unknown>(
         "onLLMStart", "onLLMEnd",
         "onToolStart", "onToolEnd",
         "onHandoff",
+        // v6.4 additive surface — keep in sync with RunHooks above
+        "onPreCompact", "onPostCompact",
+        "onSubagentStart", "onSubagentEnd",
+        "onUserPromptSubmit",
+        "onSessionStart", "onSessionEnd",
+        "onToolFailure",
     ];
     for (const method of methods) {
         (composite as any)[method] = async (payload: unknown) => {

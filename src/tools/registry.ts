@@ -311,6 +311,26 @@ export class ToolRegistry {
             return { success: false, output: "", error: `Unknown tool: ${toolName}` };
         }
 
+        // Plan-mode gate: refuse write-class tools when runContext is in PLAN
+        // mode. Kept at the registry level (not in agent-loop) so all
+        // execution paths see the same gate, including parallel dispatch.
+        if (runContext) {
+            const { PermissionMode, isWriteClassTool } = await import("../permissions/mode.js");
+            if (
+                runContext.permissionMode === PermissionMode.PLAN &&
+                isWriteClassTool(toolName)
+            ) {
+                return {
+                    success: false,
+                    output: "",
+                    error:
+                        `Refused: '${toolName}' is a write-class tool and you are in ` +
+                        "plan mode. Call exit_plan_mode first, or restrict yourself " +
+                        "to read-only tools while planning.",
+                };
+            }
+        }
+
         // Parameter validation with lenient coercion
         let effectiveArgs = args;
         if (this._validateArgs) {

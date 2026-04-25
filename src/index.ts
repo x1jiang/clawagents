@@ -24,10 +24,15 @@ export { Usage, RequestUsage } from "./usage.js";
 export type {
     StreamEvent, TurnStartedEvent, AssistantTextEvent, AssistantDeltaEvent,
     ToolCallPlannedEvent, ToolStartedEvent, ToolResultEvent, UsageEvent,
-    GuardrailTrippedEvent, FinalOutputEvent, ErrorStreamEvent,
+    GuardrailTrippedEvent, HandoffOccurredEvent, FinalOutputEvent, ErrorStreamEvent,
     ApprovalRequiredEvent, GenericStreamEvent,
 } from "./stream-events.js";
 export { streamEventFromKind } from "./stream-events.js";
+
+// ── Handoffs (v6.4) ──────────────────────────────────────────────────
+export { handoff } from "./handoffs.js";
+export type { Handoff, HandoffInputData, InputFilter } from "./handoffs.js";
+export { removeAllTools, nestHandoffHistory } from "./handoff-filters.js";
 export { RetryPolicy, DEFAULT_RETRY_POLICY } from "./retry.js";
 export { RunHooks, AgentHooks, compositeHooks } from "./lifecycle.js";
 export type {
@@ -102,3 +107,87 @@ export type { SessionInfo, SessionEvent } from "./session/persistence.js";
 
 // SSRF helpers (exposed so consumers / tests can verify guardrails)
 export { ssrfDeps } from "./tools/web.js";
+
+// ── Settings hierarchy (v6.4) ────────────────────────────────────────
+export {
+    SettingsLayer, resolveSettings, getSetting, findRepoRoot,
+    POLICY_SETTINGS_PATH_ENV, DEFAULT_POLICY_SETTINGS_PATH,
+} from "./settings/index.js";
+export type {
+    SettingsObject, SettingsValue, ResolveSettingsOptions, GetSettingOptions,
+} from "./settings/index.js";
+
+// ── Tracing (v6.4) ───────────────────────────────────────────────────
+export {
+    Span, SpanKind, SpanStatus, newTraceId,
+    TracingProcessor, TracingExporter,
+    BatchTraceProcessor, NoopSpanExporter, ConsoleSpanExporter, JsonlSpanExporter,
+    setDefaultProcessor, getDefaultProcessor, addTraceProcessor,
+    flushTraces, shutdownTracing,
+    withSpan, agentSpan, turnSpan, generationSpan, toolSpan,
+    handoffSpan, guardrailSpan, customSpan,
+    currentSpan, currentTraceId,
+} from "./tracing/index.js";
+export type { SpanInit } from "./tracing/index.js";
+
+// ── Structured HITL (v6.4) ───────────────────────────────────────────
+export {
+    askUserQuestionTool,
+    OTHER_OPTION,
+    QUESTION_MAX_CHARS, HEADER_MAX_CHARS,
+    MIN_QUESTIONS, MAX_QUESTIONS, MIN_OPTIONS, MAX_OPTIONS,
+} from "./tools/ask-user-question.js";
+export type {
+    QuestionSpec, AnswerSpec, OnAskCallback, AskUserQuestionOptions,
+} from "./tools/ask-user-question.js";
+
+// ── Multimodal helpers (v6.4) ────────────────────────────────────────
+export {
+    sanitizeImageBlock, sanitizeToolOutput, isSharpAvailable,
+    DEFAULT_MAX_DIM, DEFAULT_MAX_BYTES, DEFAULT_QUALITY_STEPS,
+} from "./media/images.js";
+export type {
+    ContentBlock as MediaContentBlock,
+    ImageBlock, ImageBlockBase64Source, ImageBlockUrlSource,
+    SanitizeOptions,
+} from "./media/images.js";
+
+// ── Exec Safety v2 (v6.4) ────────────────────────────────────────────
+export {
+    PermissionMode, WRITE_CLASS_TOOLS,
+    isWriteClassTool, permissionModeFromString,
+} from "./permissions/mode.js";
+export {
+    CommandCategory, Decision, validateBash,
+} from "./tools/bash-validator.js";
+export type { BashDecision } from "./tools/bash-validator.js";
+export { detectObfuscation } from "./tools/exec-obfuscation.js";
+export type { ObfuscationFinding } from "./tools/exec-obfuscation.js";
+export {
+    enterPlanModeTool, exitPlanModeTool, createPlanModeTools,
+} from "./tools/plan-mode.js";
+
+// ── MCP (Model Context Protocol) integration (v6.4) ──────────────────
+// The optional ``@modelcontextprotocol/sdk`` package is loaded lazily —
+// these classes import without the SDK installed and only fail on connect().
+export {
+    MCPServer,
+    MCPServerStdio,
+    MCPServerSse,
+    MCPServerStreamableHttp,
+    MCPServerManager,
+    MCPLifecyclePhase,
+    MCPBridgedTool,
+    mcpToolToClawagentsTool,
+    isMCPSdkAvailable,
+    requireMCPSdk,
+} from "./mcp/index.js";
+export type {
+    MCPServerStdioParams,
+    MCPServerSseParams,
+    MCPServerStreamableHttpParams,
+    MCPServerOptions,
+    MCPServerManagerOptions,
+    MCPToolDescriptor,
+    ToolFilter as MCPToolFilter,
+} from "./mcp/index.js";

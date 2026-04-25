@@ -12,6 +12,7 @@
  * only ``args`` continue to work unchanged.
  */
 
+import { PermissionMode } from "./permissions/mode.js";
 import { Usage } from "./usage.js";
 
 /** Per-call-ID approval decision for a tool call. */
@@ -31,6 +32,12 @@ export interface ApprovalRecord {
 export class RunContext<TContext = unknown> {
     public context: TContext | undefined;
     public usage: Usage;
+    /**
+     * Current permission mode. Mutated only by the dedicated plan-mode
+     * tools (enter_plan_mode / exit_plan_mode). Read by the registry to
+     * gate write-class tools when in PLAN mode.
+     */
+    public permissionMode: PermissionMode;
     /** Per-call-ID approvals. */
     public _approvals: Map<string, ApprovalRecord>;
     /** "Always approve/reject" decisions keyed by tool name. */
@@ -42,9 +49,11 @@ export class RunContext<TContext = unknown> {
         context?: TContext;
         usage?: Usage;
         metadata?: Record<string, unknown>;
+        permissionMode?: PermissionMode;
     } = {}) {
         this.context = init.context;
         this.usage = init.usage ?? new Usage();
+        this.permissionMode = init.permissionMode ?? PermissionMode.DEFAULT;
         this._approvals = new Map();
         this._alwaysApprovals = new Map();
         this._metadata = init.metadata ?? {};

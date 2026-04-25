@@ -1,11 +1,14 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.3.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.4.0**
 
-> **v6.3.0 (April 2026)** — Sandbox & SSRF hardening: symlink-resolving
-> `safePath` (closes a sandbox-escape bug), full IPv6 `fe80::/10` link-local
-> coverage in `web_fetch`, denylist parity with the Python sibling. 121 tests
-> pass, `tsc --noEmit` clean. See [Changelog](#changelog).
+> **v6.4.0 (April 2026)** — Big feature release. Hierarchical tracing
+> infrastructure, MCP client (stdio + SSE + Streamable-HTTP), handoffs +
+> `Agent.asTool()`, Exec Safety v2 (Plan Mode + bash validator + obfuscation
+> detector), expanded hook taxonomy + LLM-evaluated `PromptHook`,
+> AskUserQuestion structured HITL, settings hierarchy, image sanitization,
+> mock-provider parity harness. **226 tests** pass, `tsc --noEmit` clean.
+> See [Changelog](#changelog).
 
 ## Installation
 
@@ -337,7 +340,55 @@ All parameters are **optional** — zero-config usage (`createClawAgent()`) work
 | `advisorApiKey` | `string` | env `ADVISOR_API_KEY` / `undefined` | No | API key for the advisor (only if different provider than executor) |
 | `advisorMaxCalls` | `number` | env `ADVISOR_MAX_CALLS` / `3` | No | Max advisor consultations per task |
 
+**MCP Servers (v6.4)**
+
+| Param | Type | Default | Required? | Description |
+|:---|:---|:---|:---:|:---|
+| `mcpServers` | `MCPServer[]` | `undefined` | No | External MCP servers to connect at startup. Each server's tools are bridged into the registry; lifecycle phases emit tracing spans. Requires the optional `@modelcontextprotocol/sdk` peer dep. |
+
 > **Priority:** Explicit parameter > environment variable > default value. You never need to set both.
+
+### MCP Servers
+
+ClawAgents v6.4 ships first-class **Model Context Protocol** support — wire any
+MCP server (stdio, HTTP+SSE, Streamable HTTP) and its tools become first-class
+clawagents tools, no boilerplate:
+
+```ts
+import { createClawAgent, MCPServerStdio } from "clawagents";
+
+const agent = await createClawAgent({
+    model: "gpt-5-mini",
+    mcpServers: [
+        new MCPServerStdio({
+            params: { command: "node", args: ["./my-mcp-server.js"] },
+            name: "my-mcp",
+            cacheToolsList: true,
+        }),
+    ],
+});
+const result = await agent.invoke("Use the my-mcp tools to do X");
+```
+
+Install the SDK once: `npm install @modelcontextprotocol/sdk`. If `mcpServers`
+is non-empty without the SDK, `createClawAgent` throws a clear error. The
+manager connects each server, lists its tools, bridges them via
+`MCPBridgedTool` into the existing `ToolRegistry`, and stashes itself on
+`agent.mcpManager` so callers can `await agent.mcpManager.shutdown()`. Every
+lifecycle phase (`Idle → Connecting → Initializing → DiscoveringTools → Ready
+→ Invoking → Errored / Shutdown`) emits a `customSpan`, so MCP activity flows
+through the standard tracing exporters.
+
+For HTTP-based servers:
+
+```ts
+import { MCPServerSse, MCPServerStreamableHttp } from "clawagents";
+
+const mcpServers = [
+    new MCPServerSse({ params: { url: "https://example.com/mcp/sse" } }),
+    new MCPServerStreamableHttp({ params: { url: "https://example.com/mcp" } }),
+];
+```
 
 ### Built-in Tools
 
@@ -356,6 +407,44 @@ Every agent includes these — no setup needed:
 | `update_todo` | Mark plan items complete |
 | `task` | Delegate to a sub-agent with isolated context |
 | `use_skill` | Load a skill's instructions (when skills exist) |
+| `ask_user_question` | Structured HITL: ask 1-3 multiple-choice questions in one batch (opt-in) |
+
+### Structured HITL — `ask_user_question`
+
+`askUserQuestionTool` lets the agent ask 1-3 multiple-choice questions in a single batch — useful for upfront clarification with a small, well-defined option set. Each question has a short `header` (≤80 chars), the `question` text (≤256 chars), and 2-4 unique `options`. Headers must be unique across the batch; an implicit `Other (please specify)` option is appended automatically so the user can break out of the menu.
+
+The actual rendering and answer collection is delegated to a callback you supply, so the same tool plugs into a CLI prompt, a TUI, a web UI, or a channel adapter without code changes:
+
+```ts
+import { askUserQuestionTool } from "clawagents";
+
+const tool = askUserQuestionTool({
+    async onAsk(questions) {
+        // Render with your UI of choice; return a record keyed by header.
+        return Object.fromEntries(questions.map((q) => [
+            q.header,
+            { question: q.question, answer: q.options[0]! },
+        ]));
+    },
+});
+```
+
+If no `onAsk` is supplied the tool fails fast with a clear error rather than hanging on stdin — safe to install in headless gateways.
+
+### Multimodal — Tool Output Hygiene
+
+Anthropic's Messages API rejects images > 5MB and tends to fail on images much larger than ~2000px on a side. When tool results surface large screenshots or attachments, they can silently break the conversation. `clawagents`' `media/images` clamps base64 image blocks down to safe limits via `sharp`:
+
+```ts
+import { sanitizeImageBlock, sanitizeToolOutput } from "clawagents";
+
+const cleanBlock = await sanitizeImageBlock(block, { maxDim: 1200, maxBytes: 5 * 1024 * 1024 });
+const cleanOutput = await sanitizeToolOutput(toolResultBlocks);
+```
+
+- Base64 sources: decode → resize the longest side down to `maxDim` (aspect-preserving), recompress as JPEG (or PNG when the input is a PNG with alpha) walking through `qualitySteps=[90, 75, 60]` until under `maxBytes`. If still too big at the lowest quality, the block is replaced with a `[image too large after sanitization, dropped]` text block.
+- URL sources and non-image blocks pass through unchanged.
+- `sharp` is an **optional** dependency (`npm install sharp`). Without it, the helpers no-op and emit a one-time warning. `isSharpAvailable()` reports the runtime state.
 
 ### Hooks (Convenience Methods)
 
@@ -574,6 +663,30 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_HOOK_POST_LLM` | Shell command after each LLM response. Fire-and-forget logging. |
 
 ## Changelog
+
+### v6.4.0 — Tracing, MCP, Handoffs, Plan Mode (April 2026)
+
+Big feature release. Nine new subsystems shipped on **both** Python and TypeScript ports — every change comes with regression tests on both. Test totals: **TypeScript 226 passed**, **Python 516 passed**, `tsc --noEmit` clean, mypy clean.
+
+**Tier 1 — production interop & safety:**
+
+- **🔭 Tracing infrastructure** (`clawagents/tracing/`) — hierarchical Span model with 8 kinds (`agent` / `turn` / `generation` / `tool` / `handoff` / `guardrail` / `subagent` / `custom`), pluggable `TracingProcessor` + `TracingExporter` ABCs, batched `BatchTraceProcessor`, ready-made `JsonlSpanExporter` / `ConsoleSpanExporter` / `NoopSpanExporter`, and `agentSpan` / `turnSpan` / `generationSpan` / `toolSpan` / `handoffSpan` helpers. Spans propagate via Node's `AsyncLocalStorage`. Replaces flat trajectory JSONL — drop in OTLP/Langfuse/Logfire by writing one exporter.
+- **🔌 MCP (Model Context Protocol) integration** (`clawagents/mcp/`) — full client supporting **stdio**, **SSE**, and **Streamable-HTTP** transports. `MCPServerStdio` / `MCPServerSse` / `MCPServerStreamableHttp` with `MCPServerManager` lifecycling a list of servers and `MCPBridgedTool` adapting MCP tools into the `ToolRegistry`. SDK is an optional dep (`npm install @modelcontextprotocol/sdk`). 11 lifecycle phases tracked with tracing spans.
+- **🔁 Handoffs + `Agent.asTool()`** — fills the previously-stub `onHandoff` lifecycle hook. `Handoff` + `handoff()` builder transfers control between agents (with optional `inputFilter`); `agent.asTool({toolName, toolDescription})` exposes any agent as a callable tool. Built-in `removeAllTools` filter + `HandoffOccurredEvent` typed stream event.
+- **🛡️ Exec safety v2** (`clawagents/permissions/`, `clawagents/tools/{plan-mode,bash-validator,exec-obfuscation}`) — three security upgrades: (1) `PermissionMode` enum (`DEFAULT|PLAN|ACCEPT_EDITS|BYPASS`) on `RunContext` plus `enterPlanModeTool` / `exitPlanModeTool`; (2) Bash semantic validator with 47-row corpus; (3) Command obfuscation detector for base64/hex/printf decode-then-exec, `<(curl …)`, `curl … | sh`, and 9 other patterns with allowlist for known-safe installers.
+- **🪝 Hook event taxonomy expansion + `PromptHook`** — extended `RunHooks` with 8 additive events: `onPreCompact`, `onPostCompact`, `onSubagentStart`, `onSubagentEnd`, `onUserPromptSubmit`, `onSessionStart`, `onSessionEnd`, `onToolFailure`. New `PromptHook({prompt, model})` evaluates a guardrail using a small/cheap model with strict-JSON `{"ok":bool, "reason":str}` verdict — write a natural-language guardrail without writing TypeScript code. Fails open on timeout/error.
+
+**Tier 2 — ergonomics & correctness:**
+
+- **❓ AskUserQuestion structured tool** (`clawagents/tools/ask-user-question`) — structured HITL primitive: 1-3 multi-choice questions per call, 2-4 options each, implicit `"Other (please specify)"` always appended. Renders cleanly to Telegram inline buttons / WhatsApp quick-replies via the `onAsk` callback.
+- **⚙️ Settings hierarchy** (`clawagents/settings/`) — `user → project → local → flag → policy` precedence, deep-merged. Policy layer ALWAYS wins. Repo root walks up looking for `.git`/`package.json`. `getSetting("hooks.beforeTool")` for dotted-path access.
+- **🖼️ Image sanitization** (`clawagents/media/images`) — clamps tool-result base64 image blocks to ≤1200px / ≤5MB before transcript ingest. Closes a silent-failure path on Anthropic's 5MB limit. `sharp` is **optional** (`npm install sharp`).
+
+**Tier 3 — testing infrastructure:**
+
+- **🎭 Mock-provider parity harness** (`clawagents/testing/mock-provider`) — deterministic fake LLM service (`MockLLMService`) bound to `127.0.0.1:0`. Real provider clients point at it via `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`. Routes via `X-Parity-Scenario:` header or `PARITY_SCENARIO: <name>` system message. Five built-in scenarios. Pure stdlib `node:http`, zero new deps.
+
+**v6.5 backlog (deferred):** Anthropic prompt-cache tracking + cache-break detection, auth-profile rotation with cooldowns, multi-provider routing prefix + LiteLLM extension, file checkpoint snapshots, cache-TTL provider eligibility map, `toolUseBehavior` / `StopAtTools`, granular lifecycle payload widening, skills hot-reload watcher, `finalize` cleanup hook, `editScope` allowlist in skills.
 
 ### v6.3.0 — Sandbox & SSRF Hardening, Python Parity
 

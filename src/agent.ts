@@ -14,6 +14,8 @@ import { createProvider } from "./providers/llm.js";
 import { loadMemoryFiles } from "./memory/loader.js";
 import type { SandboxBackend } from "./sandbox/backend.js";
 import { LocalBackend } from "./sandbox/local.js";
+import type { Handoff } from "./handoffs.js";
+import type { RunContext } from "./run-context.js";
 
 // ─── LangChain Tool Adapter ──────────────────────────────────────────────────
 
@@ -91,6 +93,10 @@ export class ClawAgent {
     public features?: Record<string, boolean>;
     public advisorLLM?: LLMProvider;
     public advisorMaxCalls: number;
+    /** Optional list of handoffs surfaced to the LLM as transfer tools. */
+    public handoffs: Handoff[];
+    /** Optional display name (used as defaults for handoffs and traces). */
+    public name?: string;
 
     /**
      * @param llm - The instantiated LLM provider structure
@@ -122,6 +128,8 @@ export class ClawAgent {
         features?: Record<string, boolean>,
         advisorLLM?: LLMProvider,
         advisorMaxCalls = 3,
+        handoffs?: Handoff[],
+        name?: string,
     ) {
         this.llm = llm;
         this.tools = tools;
@@ -143,6 +151,8 @@ export class ClawAgent {
         this.features = features;
         this.advisorLLM = advisorLLM;
         this.advisorMaxCalls = advisorMaxCalls;
+        this.handoffs = handoffs ? [...handoffs] : [];
+        this.name = name;
     }
 
     /**
@@ -160,6 +170,15 @@ export class ClawAgent {
         features?: Record<string, boolean>,
         extras?: AgentLoopExtras<TContext>,
     ): Promise<AgentState> {
+        // Default handoffs/agentName from the agent unless callers override
+        // them in `extras`. Cast handoffs across TContext boundaries —
+        // input filters only consume the generic param via `runContext`,
+        // which is variant-safe in practice.
+        const mergedExtras: AgentLoopExtras<TContext> = {
+            ...(extras ?? {}),
+            handoffs: (extras?.handoffs ?? this.handoffs) as AgentLoopExtras<TContext>["handoffs"],
+            agentName: extras?.agentName ?? this.name,
+        };
         return await runAgentGraph<TContext>(
             task,
             this.llm,
@@ -182,8 +201,94 @@ export class ClawAgent {
             features ?? this.features,
             this.advisorLLM,
             this.advisorMaxCalls,
-            extras,
+            mergedExtras,
         );
+    }
+
+    /**
+     * Expose this agent as a tool callable by another agent.
+     *
+     * Unlike a {@link Handoff}, the wrapped agent is invoked synchronously
+     * inside the parent's tool dispatch: parent calls, child runs, parent
+     * resumes. The default output is `state.result` from the child's
+     * terminal turn; provide `customOutputExtractor` to project anything
+     * from the final {@link AgentState}.
+     *
+     * When `needsApproval=true` the tool emits an `approval_required`
+     * event and waits for the parent's RunContext approval store before
+     * running the child.
+     */
+    asTool(opts: {
+        toolName: string;
+        toolDescription: string;
+        customOutputExtractor?: (state: AgentState) => string;
+        needsApproval?: boolean;
+    }): Tool {
+        const wrapped = this;
+        const toolName = opts.toolName;
+        const description = opts.toolDescription;
+        const extractor = opts.customOutputExtractor;
+        const needsApproval = opts.needsApproval ?? false;
+
+        return {
+            name: toolName,
+            description,
+            parameters: {
+                task: {
+                    type: "string",
+                    description: (
+                        "The task or question to send to the wrapped agent. " +
+                        "The agent receives this as its initial user input."
+                    ),
+                    required: true,
+                },
+            },
+            async execute(args: Record<string, unknown>, runContext?: RunContext<unknown>): Promise<ToolResult> {
+                const task = String(args.task ?? "").trim();
+                if (!task) {
+                    return {
+                        success: false,
+                        output: "",
+                        error: `${toolName}: missing required 'task' argument`,
+                    };
+                }
+                if (needsApproval && runContext) {
+                    const decision = runContext.isToolApproved(toolName, { toolName });
+                    if (decision === false) {
+                        const rec = runContext.getApproval(toolName, { toolName });
+                        const reason = rec?.reason ?? "approval rejected";
+                        return { success: false, output: "", error: `${toolName}: ${reason}` };
+                    }
+                    if (decision === undefined) {
+                        return {
+                            success: false,
+                            output: "",
+                            error: (
+                                `${toolName}: approval required (use ` +
+                                "runContext.approveTool() to allow)"
+                            ),
+                        };
+                    }
+                }
+
+                let childState: AgentState;
+                try {
+                    childState = await wrapped.invoke(task);
+                } catch (e) {
+                    return { success: false, output: "", error: `${toolName} raised: ${e}` };
+                }
+
+                if (extractor) {
+                    try {
+                        const out = extractor(childState);
+                        return { success: true, output: String(out) };
+                    } catch (e) {
+                        return { success: false, output: "", error: `${toolName}: output extractor raised: ${e}` };
+                    }
+                }
+                return { success: true, output: String(childState.result) };
+            },
+        };
     }
 
     // ── Convenience hook methods ──────────────────────────────────────
@@ -305,6 +410,9 @@ export async function createClawAgent({
     advisorModel,
     advisorApiKey,
     advisorMaxCalls,
+    mcpServers,
+    handoffs,
+    name,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
@@ -337,6 +445,17 @@ export async function createClawAgent({
     advisorApiKey?: string;
     /** Max advisor consultations per task (default: 3). */
     advisorMaxCalls?: number;
+    /**
+     * Optional list of MCP (Model Context Protocol) servers. Each server is
+     * connected, its tools are discovered and bridged into the ToolRegistry,
+     * and the agent gets a ``mcpManager`` reference for explicit shutdown.
+     * Requires the optional ``@modelcontextprotocol/sdk`` peer dep.
+     */
+    mcpServers?: import("./mcp/server.js").MCPServer[];
+    /** Handoff descriptors surfaced to the LLM as ``transfer_to_<name>`` tools. */
+    handoffs?: Handoff[];
+    /** Agent display name (used for handoff defaults and tracing). */
+    name?: string;
 } = {}): Promise<ClawAgent> {
     // ── Resolve opt-in flags ─────────────────────────────────────────
     const envTrue = (key: string) => ["1", "true", "yes"].includes(
@@ -508,11 +627,28 @@ export async function createClawAgent({
         composedBeforeLLM ?? undefined, undefined, undefined, enableTrajectory, enableRethink,
         enableLearn, resolvedMaxIterations, resolvedPreviewChars, resolvedResponseChars,
         resolvedTimeoutS, features, resolvedAdvisorLLM, resolvedAdvisorMaxCalls,
+        handoffs, name,
     );
 
     // ── Sub-agent tool (always available) ────────────────────────────
     const { createTaskTool } = await import("./tools/subagent.js");
     registry.register(createTaskTool(llm, registry));
+
+    // ── MCP server integration (v6.4, optional) ──────────────────────
+    if (mcpServers && mcpServers.length > 0) {
+        const { isMCPSdkAvailable, MCPServerManager } = await import("./mcp/index.js");
+        if (!(await isMCPSdkAvailable())) {
+            throw new Error(
+                "createClawAgent received mcpServers= but the optional " +
+                "@modelcontextprotocol/sdk package is not installed. " +
+                "Install it with: npm install @modelcontextprotocol/sdk",
+            );
+        }
+        const manager = new MCPServerManager(mcpServers);
+        await manager.start(registry);
+        // Expose the manager so callers can shutdown explicitly.
+        (agent as unknown as { mcpManager?: unknown }).mcpManager = manager;
+    }
 
     return agent;
 }

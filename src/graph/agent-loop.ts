@@ -38,6 +38,7 @@ import {
 } from "../guardrails.js";
 import type { Session } from "../session/backends.js";
 import { RetryPolicy } from "../retry.js";
+import { handoffSpan } from "../tracing/context.js";
 
 // ─── Model Control Token Sanitization ─────────────────────────────────────
 // Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)
@@ -304,6 +305,7 @@ export type EventKind =
     | "tool_result_typed"
     | "usage"
     | "guardrail_tripped"
+    | "handoff_occurred"
     | "final_output";
 
 export type OnEvent = (kind: EventKind, data: Record<string, unknown>) => void;
@@ -1231,6 +1233,8 @@ export interface AgentLoopExtras<TContext = unknown> {
     agentName?: string;
     /** Composable retry policy (not yet wired into every LLM call — exposed for downstream use). */
     retryPolicy?: RetryPolicy;
+    /** Handoff descriptors surfaced to the LLM as ``transfer_to_<name>`` tools. */
+    handoffs?: import("../handoffs.js").Handoff<TContext>[];
 }
 
 export async function runAgentGraph<TContext = unknown>(
@@ -1281,6 +1285,44 @@ export async function runAgentGraph<TContext = unknown>(
         useNativeTools && registry ? registry.toNativeSchemas() : undefined;
     let toolDesc = (!useNativeTools && registry) ? registry.describeForLLM() : "";
     const loopTracker = new ToolCallTracker();
+
+    // ── Synthesise handoff tools (v6.4) ──
+    // Each Handoff becomes a synthetic tool the LLM can call. We DO NOT
+    // add these to the registry — they're dispatched directly by the loop
+    // so they can switch the active agent rather than execute a tool.
+    const handoffList: import("../handoffs.js").Handoff<TContext>[] =
+        extras?.handoffs ? [...extras.handoffs] : [];
+    const handoffMap: Map<string, import("../handoffs.js").Handoff<TContext>> = new Map(
+        handoffList.map((h) => [h.name, h]),
+    );
+    if (handoffList.length > 0) {
+        const handoffParams = {
+            reason: {
+                type: "string",
+                description: "Free-text rationale for why the handoff is appropriate.",
+                required: false,
+            },
+        };
+        if (useNativeTools) {
+            if (!nativeSchemas) nativeSchemas = [];
+            for (const h of handoffList) {
+                nativeSchemas.push({
+                    name: h.name,
+                    description: h.description,
+                    parameters: handoffParams as any,
+                });
+            }
+        } else {
+            const lines = ["", "## Handoffs"];
+            for (const h of handoffList) {
+                lines.push(`### ${h.name}\n${h.description}`);
+                lines.push("Parameters:");
+                lines.push("- `reason` (string): Free-text rationale.");
+                lines.push("");
+            }
+            toolDesc = (toolDesc || "") + "\n" + lines.join("\n");
+        }
+    }
 
     // Wrap the legacy `emit` so every event also lifts into the typed stream.
     const legacyEmit = onEvent ?? defaultOnEvent;
@@ -1709,6 +1751,184 @@ export async function runAgentGraph<TContext = unknown>(
                 emit("final_content", { content: state.result });
                 messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
                 break;
+            }
+
+            // ── Handoff dispatch (v6.4) ──────────────────────────────
+            // If the LLM called a synthetic handoff tool, transfer
+            // control to the target agent and return its terminal state.
+            // We honour only the first handoff in a batch — multiple
+            // handoffs in one turn don't make sense (a transfer is
+            // exclusive).
+            if (handoffMap.size > 0) {
+                let handoffCallIdx = -1;
+                for (let i = 0; i < toolCalls.length; i++) {
+                    if (handoffMap.has(toolCalls[i]!.toolName)) {
+                        handoffCallIdx = i;
+                        break;
+                    }
+                }
+                if (handoffCallIdx >= 0) {
+                    const hc = toolCalls[handoffCallIdx]!;
+                    const hObj = handoffMap.get(hc.toolName)!;
+                    const reasonText = typeof (hc.args as Record<string, unknown>)?.reason === "string"
+                        ? String((hc.args as Record<string, unknown>).reason)
+                        : "";
+                    const nativeTc = useNativeTools && handoffCallIdx < nativeToolCallObjects.length
+                        ? nativeToolCallObjects[handoffCallIdx]
+                        : undefined;
+
+                    let targetAgent: import("../agent.js").ClawAgent;
+                    try {
+                        targetAgent = hObj.targetAgentFactory();
+                    } catch (resolveErr) {
+                        emit("warn", { message: `handoff target resolution failed: ${resolveErr}` });
+                        messages.push({
+                            role: "user",
+                            content: `[Handoff Error] Could not resolve target agent: ${resolveErr}`,
+                        });
+                        state.iterations += 1;
+                        continue;
+                    }
+
+                    const targetName = (targetAgent as unknown as { name?: unknown }).name as string | undefined ?? hc.toolName;
+                    const fromName = agentName;
+
+                    // Stamp the assistant message that triggered the handoff
+                    // so the input filter sees a complete transcript, then
+                    // synthesise a tool-result acknowledgement (most providers
+                    // reject orphan tool calls).
+                    if (useNativeTools && nativeTc?.toolCallId) {
+                        messages.push({
+                            role: "assistant",
+                            content: response.content || "",
+                            toolCallsMeta: [{
+                                id: nativeTc.toolCallId,
+                                name: hc.toolName,
+                                args: hc.args,
+                            }],
+                            ...(response.geminiParts ? { geminiParts: response.geminiParts } : {}),
+                            thinking: _thinkingContent,
+                        });
+                        messages.push({
+                            role: "tool",
+                            content: `[Handoff] transferred to ${targetName}`,
+                            toolCallId: nativeTc.toolCallId,
+                        });
+                    } else {
+                        messages.push({
+                            role: "assistant",
+                            content: `{"tool": "${hc.toolName}", "args": ${JSON.stringify(hc.args)}}`,
+                            thinking: _thinkingContent,
+                        });
+                        messages.push({
+                            role: "user",
+                            content: `[Handoff] transferred to ${targetName}`,
+                        });
+                    }
+
+                    const handoffPayload: import("../handoffs.js").HandoffInputData<TContext> = {
+                        inputHistory: [...messages],
+                        preHandoffItems: messages.slice(0, sessionStartCursor) as unknown[],
+                        newItems: messages.slice(sessionStartCursor) as unknown[],
+                        runContext,
+                    };
+                    let filteredPayload = handoffPayload;
+                    if (hObj.inputFilter) {
+                        try {
+                            filteredPayload = hObj.inputFilter(handoffPayload);
+                        } catch (filterErr) {
+                            emit("warn", { message: `handoff inputFilter raised: ${filterErr}` });
+                        }
+                    }
+                    const filteredMessages = filteredPayload.inputHistory;
+
+                    if (hObj.onHandoff) {
+                        try {
+                            await hObj.onHandoff(runContext);
+                        } catch (hkErr) {
+                            emit("warn", { message: `handoff onHandoff raised: ${hkErr}` });
+                        }
+                    }
+                    await fireHook("onHandoff", { fromAgent: fromName, toAgent: targetName });
+
+                    emit("warn", { message: `handoff: ${fromName} → ${targetName}` });
+                    emit("handoff_occurred", {
+                        fromAgent: fromName,
+                        toAgent: targetName,
+                        toolName: hc.toolName,
+                        reason: reasonText,
+                    });
+
+                    // Forward the most recent user message (or the original
+                    // task) and pre-load any other non-system messages via
+                    // a transient session protocol.
+                    let forwardTask: string = task;
+                    for (let i = filteredMessages.length - 1; i >= 0; i--) {
+                        const m = filteredMessages[i]!;
+                        if (m.role === "user" && typeof m.content === "string") {
+                            forwardTask = m.content;
+                            break;
+                        }
+                    }
+                    let preload = filteredMessages.filter((m) => m.role !== "system");
+                    if (
+                        preload.length > 0 &&
+                        preload[preload.length - 1]!.role === "user" &&
+                        typeof preload[preload.length - 1]!.content === "string" &&
+                        preload[preload.length - 1]!.content === forwardTask
+                    ) {
+                        preload = preload.slice(0, -1);
+                    }
+
+                    const transientSession: Session | undefined = preload.length > 0
+                        ? {
+                              sessionId: `handoff:${hc.toolName}`,
+                              async getItems(): Promise<LLMMessage[]> {
+                                  return [...preload];
+                              },
+                              async addItems(_items: LLMMessage[]): Promise<void> {
+                                  /* no-op */
+                              },
+                              async popItem(): Promise<LLMMessage | null> {
+                                  return null;
+                              },
+                              async clearSession(): Promise<void> {
+                                  /* no-op */
+                              },
+                          }
+                        : undefined;
+
+                    let childState;
+                    try {
+                        childState = await handoffSpan(
+                            hc.toolName,
+                            async () => targetAgent.invoke(forwardTask, undefined, undefined, undefined, undefined, {
+                                runContext: runContext as RunContext<unknown> as RunContext<TContext>,
+                                onStreamEvent,
+                                ...(transientSession ? { session: transientSession } : {}),
+                            }),
+                            { fromAgent: fromName, toAgent: targetName },
+                        );
+                    } catch (runErr) {
+                        emit("warn", { message: `handoff target raised: ${runErr}` });
+                        messages.push({
+                            role: "user",
+                            content: `[Handoff Error] Target agent failed: ${runErr}`,
+                        });
+                        state.iterations += 1;
+                        continue;
+                    }
+
+                    state.result = childState.result;
+                    state.status = childState.status === "running" ? "done" : childState.status;
+                    state.finalOutput = childState.finalOutput !== undefined && childState.finalOutput !== null
+                        ? childState.finalOutput
+                        : childState.result;
+                    state.toolCalls += childState.toolCalls;
+                    state.iterations += 1;
+                    state.messages = [...messages, ...childState.messages];
+                    break;
+                }
             }
 
             if (loopTracker.isCircuitBroken()) {

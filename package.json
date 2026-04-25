@@ -1,6 +1,6 @@
 {
   "name": "clawagents",
-  "version": "6.3.0",
+  "version": "6.4.0",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/web.test.ts tests/simulated.test.ts",
+    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/web.test.ts src/tools/ask-user-question.test.ts src/tools/exec-safety-v2.test.ts src/media/images.test.ts src/settings/resolver.test.ts src/testing/mock-provider.test.ts src/tracing/tracing.test.ts src/mcp/mcp.test.ts src/handoffs.test.ts tests/simulated.test.ts",
     "test:surfaces": "tsx tests/openai_agents_surfaces.test.ts",
     "test:all": "npm run test && npm run test:surfaces",
     "prepare": "npm run build",
@@ -60,6 +60,8 @@
   "optionalDependencies": {
     "@anthropic-ai/sdk": ">=0.30.0",
     "@google/genai": "^1.9.0",
+    "@modelcontextprotocol/sdk": ">=1.0.0",
+    "sharp": "^0.33.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
