@@ -466,6 +466,35 @@ async function main() {
     try { safePath("/etc/passwd"); assert(false, "absolute path should throw"); }
     catch { assert(true, "absolute path outside root blocked"); }
 
+    // Symlink-traversal regression: lexical resolve doesn't follow symlinks. The
+    // real LocalBackend.safePath must realpath the user path so an agent that
+    // creates a symlink (`ln -s /etc evil`) cannot read /etc/* through it.
+    const { LocalBackend: _LB } = await import("../src/sandbox/local.js");
+    const { mkdtempSync, symlinkSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const _sboxRoot = mkdtempSync(`${tmpdir()}/clawagents-symlink-test-`);
+    try {
+        symlinkSync("/etc", `${_sboxRoot}/evil_link`);
+        writeFileSync(`${_sboxRoot}/inside.txt`, "ok");
+        const _sb = new _LB(_sboxRoot);
+        let _blocked = false;
+        try { _sb.safePath("evil_link/hosts"); }
+        catch { _blocked = true; }
+        assert(_blocked, "safePath: read through symlink to /etc blocked");
+        let _blocked2 = false;
+        try { _sb.safePath("evil_link/new_via_symlink"); }
+        catch { _blocked2 = true; }
+        assert(_blocked2, "safePath: write through symlinked parent blocked");
+        // Existing file must still resolve (cwd is realpath'd, no false positive)
+        const _ok = _sb.safePath("inside.txt");
+        assert(typeof _ok === "string" && _ok.endsWith("inside.txt"), "safePath: legit file still works");
+        // New file in non-existent subdir must still work (write_file path)
+        const _newOk = _sb.safePath("subdir/new.txt");
+        assert(typeof _newOk === "string" && _newOk.endsWith("subdir/new.txt"), "safePath: new file path works");
+    } finally {
+        rmSync(_sboxRoot, { recursive: true, force: true });
+    }
+
     // ━━━ 17. Exec Safety ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     section("17. Exec Safety");
 
@@ -479,6 +508,55 @@ async function main() {
 
     const emptyResult = await execTool.execute({ command: "" });
     assert(!emptyResult.success, "exec: empty command fails");
+
+    // Bug 1: `> /dev/null` is a common shell idiom and must NOT be blocked
+    const devnullResult = await execTool.execute({ command: "ls > /dev/null" });
+    assert(
+        devnullResult.success || !(devnullResult.error ?? "").includes("Blocked"),
+        "exec: `ls > /dev/null` is not blocked as dangerous"
+    );
+
+    // Bug 1: writing to a block device like /dev/sda IS blocked
+    const blockDeviceResult = await execTool.execute({ command: "dd if=/dev/zero of=/dev/sda" });
+    assert(
+        !blockDeviceResult.success && (blockDeviceResult.error ?? "").includes("Blocked"),
+        "exec: `dd if=/dev/zero of=/dev/sda` blocked"
+    );
+
+    // Bug 2: `rm /` (no flags) must be blocked (parity with Python regex `(?:-\w*[rf]\w*\s+)*`)
+    const rmRootNoFlags = await execTool.execute({ command: "rm /" });
+    assert(
+        !rmRootNoFlags.success && (rmRootNoFlags.error ?? "").includes("Blocked"),
+        "exec: `rm /` (no flags) blocked"
+    );
+
+    // Bug 2: `rm -rf /` must still be blocked
+    const rmRootRf = await execTool.execute({ command: "rm -rf /" });
+    assert(
+        !rmRootRf.success && (rmRootRf.error ?? "").includes("Blocked"),
+        "exec: `rm -rf /` blocked"
+    );
+
+    // Bug 2: `rm /tmp/foo` must NOT be blocked (regex anchors `\s*$` after the slash)
+    const rmTmp = await execTool.execute({ command: "rm /tmp/_clawagents_should_not_exist_xyz" });
+    assert(
+        !(rmTmp.error ?? "").includes("Blocked"),
+        "exec: `rm /tmp/foo` not blocked as dangerous"
+    );
+
+    // Parity with Python clawagents_py: wget http / curl http blocked.
+    // Agents should use the web_fetch tool (which has SSRF guards) for HTTP,
+    // not raw shell utilities that bypass the protections.
+    const wgetResult = await execTool.execute({ command: "wget http://example.com/secret" });
+    assert(
+        !wgetResult.success && (wgetResult.error ?? "").includes("Blocked"),
+        "exec: `wget http://...` blocked (use web_fetch tool instead)"
+    );
+    const curlResult = await execTool.execute({ command: "curl http://example.com/secret" });
+    assert(
+        !curlResult.success && (curlResult.error ?? "").includes("Blocked"),
+        "exec: `curl http://...` blocked (use web_fetch tool instead)"
+    );
 
     // ━━━ 18. Stable Key Ordering in ToolCallTracker ━━━━━━━━━━━━━━━━━━━━
     section("18. Stable Key Ordering in ToolCallTracker");

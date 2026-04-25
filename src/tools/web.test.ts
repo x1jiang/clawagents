@@ -124,3 +124,39 @@ describe("web_fetch SSRF", () => {
         assert.match(output, /\/dest/);
     });
 });
+
+describe("isPrivateIp — IPv6 ranges", () => {
+    // Full fe80::/10 link-local range covers hex prefixes fe80..febf.
+    // The previous implementation only matched fe8X, missing fe9X / feaX / febX.
+    it("blocks all of fe80::/10 link-local (fe80, fe90, fea0, feb0)", () => {
+        for (const ip of ["fe80::1", "fe90::1", "fea0::1", "feb0::1", "febf::ffff"]) {
+            assert.equal(ssrfDeps.isPrivateIp(ip), true, `expected ${ip} blocked as link-local`);
+        }
+    });
+
+    it("does NOT block fec0:: (deprecated site-local, not in fe80::/10)", () => {
+        // fec0::/10 was deprecated in RFC 3879 and is not assignable; treat as public unless
+        // some other rule fires. Just confirm we no longer over-block fe[c-f].
+        assert.equal(ssrfDeps.isPrivateIp("fec0::1"), false);
+    });
+
+    it("blocks ULA fc00::/7 (fc.., fd..)", () => {
+        assert.equal(ssrfDeps.isPrivateIp("fc00::1"), true);
+        assert.equal(ssrfDeps.isPrivateIp("fdab::1"), true);
+    });
+
+    it("blocks loopback and unspecified", () => {
+        assert.equal(ssrfDeps.isPrivateIp("::1"), true);
+        assert.equal(ssrfDeps.isPrivateIp("::"), true);
+    });
+
+    it("blocks IPv4-mapped private addresses", () => {
+        assert.equal(ssrfDeps.isPrivateIp("::ffff:127.0.0.1"), true);
+        assert.equal(ssrfDeps.isPrivateIp("::ffff:10.0.0.1"), true);
+    });
+
+    it("allows public IPv6 addresses", () => {
+        assert.equal(ssrfDeps.isPrivateIp("2001:4860:4860::8888"), false); // Google DNS
+        assert.equal(ssrfDeps.isPrivateIp("2606:4700:4700::1111"), false); // Cloudflare
+    });
+});

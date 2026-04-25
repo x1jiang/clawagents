@@ -56,8 +56,9 @@ function isPrivateIp(ip: string): boolean {
     if (family === 6) {
         const lower = ip.toLowerCase();
         if (lower === "::" || lower === "::1") return true;
-        if (lower.startsWith("fe80:") || lower.startsWith("fe8")) return true; // link-local
-        if (lower.startsWith("fc") || lower.startsWith("fd")) return true;     // ULA
+        // fe80::/10 — link-local. First 10 bits fixed → hex prefixes fe80..febf.
+        if (/^fe[89ab]/.test(lower)) return true;
+        if (lower.startsWith("fc") || lower.startsWith("fd")) return true;     // ULA fc00::/7
         if (lower.startsWith("ff")) return true;                                // multicast
         if (lower.startsWith("::ffff:")) {
             // IPv4-mapped — re-check as v4

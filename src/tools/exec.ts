@@ -14,10 +14,11 @@ const MAX_OUTPUT_CHARS = 10_000;
 const BLOCKED_PATTERNS = [
     "rm -rf /", "rm -rf /*", "rm -rf .", "rm -rf ~",
     "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:",
-    "chmod -R 777 /", "chown -R", "> /dev/null",
+    "chmod -R 777 /", "chown -R",
+    "wget http", "curl http",
 ];
 
-const DANGEROUS_RE = /(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)\/\s*$|>\s*\/dev\/sd|mkfs\.|dd\s+if=|:\(\)\s*\{/i;
+const DANGEROUS_RE = /(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)*\/\s*$|>\s*\/dev\/sd|mkfs\.|dd\s+if=|:\(\)\s*\{/i;
 
 function isDangerousCommand(command: string): boolean {
     if (DANGEROUS_RE.test(command)) return true;

@@ -13,6 +13,7 @@ import {
     mkdir as fsMkdir,
     access,
 } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import {
     resolve,
     relative,
@@ -39,7 +40,14 @@ export class LocalBackend implements SandboxBackend {
     readonly sep = sep;
 
     constructor(root?: string) {
-        this.cwd = root ?? process.cwd();
+        const raw = root ?? process.cwd();
+        // Realpath cwd at construction so safePath can compare apples-to-apples
+        // when realpath later resolves symlinks in user paths (e.g. /var → /private/var on macOS).
+        try {
+            this.cwd = realpathSync(raw);
+        } catch {
+            this.cwd = resolve(raw);
+        }
     }
 
     // ── Path helpers ────────────────────────────────────────────────
@@ -65,11 +73,39 @@ export class LocalBackend implements SandboxBackend {
     }
 
     safePath(userPath: string): string {
-        const resolved = resolve(this.cwd, userPath);
-        if (resolved !== this.cwd && !resolved.startsWith(this.cwd + sep)) {
-            throw new Error(`Path traversal blocked: ${userPath}`);
+        const lexical = resolve(this.cwd, userPath);
+        // Resolve symlinks. path.resolve() is purely lexical, so without this an
+        // agent could `ln -s /etc evil` and then read `evil/passwd` — the lexical
+        // path stays inside cwd while the actual filesystem operation escapes.
+        // For a path that doesn't exist yet (e.g. write_file to a new file), walk
+        // up until we find an existing ancestor and realpath that.
+        let head = lexical;
+        const tail: string[] = [];
+        while (true) {
+            try {
+                const realHead = realpathSync(head);
+                const final = tail.length ? resolve(realHead, ...tail) : realHead;
+                if (final !== this.cwd && !final.startsWith(this.cwd + sep)) {
+                    throw new Error(`Path traversal blocked: ${userPath}`);
+                }
+                return final;
+            } catch (err) {
+                if (err instanceof Error && err.message.startsWith("Path traversal")) {
+                    throw err;
+                }
+                const parent = dirname(head);
+                if (parent === head) {
+                    // Walked to filesystem root without finding any existing ancestor;
+                    // fall back to the lexical check.
+                    if (lexical !== this.cwd && !lexical.startsWith(this.cwd + sep)) {
+                        throw new Error(`Path traversal blocked: ${userPath}`);
+                    }
+                    return lexical;
+                }
+                tail.unshift(basename(head));
+                head = parent;
+            }
         }
-        return resolved;
     }
 
     // ── File I/O ────────────────────────────────────────────────────

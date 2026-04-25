@@ -570,6 +570,23 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.3.0 — Sandbox & SSRF Hardening, Python Parity
+
+Security/correctness release. Eleven bugs fixed across the TypeScript and Python ports. All tests green: **121 passed**, **`tsc --noEmit` clean**.
+
+**Security fixes (TypeScript):**
+- **Sandbox escape via symlink** — `LocalBackend.safePath` was lexical-only (`path.resolve`), so an agent that ran `ln -s /etc evil` could read `/etc/*` through the symlink. Now uses `realpathSync` for both cwd (at construction) and resolved paths (at check time), so symlinks are followed before the containment check. For paths that don't yet exist (write-file flow), walks up the path until it finds an existing ancestor and realpath's that.
+- **SSRF gap — incomplete IPv6 link-local match** — `isPrivateIp` checked `lower.startsWith("fe8")`, missing `fe9X`/`feaX`/`febX`. The full `fe80::/10` range covers hex prefixes `fe80–febf`. Replaced with `/^fe[89ab]/`.
+- **`> /dev/null` blocked legitimate redirects** — `BLOCKED_PATTERNS` had `"> /dev/null"` (typo for `"> /dev/sd"`, which IS dangerous). Removed.
+- **`rm /` regex parity with Python** — `DANGEROUS_RE` was missing the `*` quantifier on the flag group, so `rm /` (no flags) slipped past while Python's regex blocked it. Added `*`.
+- **`wget http` / `curl http` blocked** — added to `BLOCKED_PATTERNS` for parity with Python. Agents should use the `web_fetch` tool (with SSRF guards) for HTTP, not raw shell utilities that bypass those protections.
+
+**Regression coverage added:**
+- `src/tools/web.test.ts` — 6 unit tests for `isPrivateIp`: full `fe80::/10` link-local range, ULA `fc00::/7`, loopback, IPv4-mapped private, public IPv6 (Google DNS, Cloudflare).
+- `tests/simulated.test.ts` — added asserts in section 16 (Path Traversal) for symlink-escape blocking, both for read paths and write paths through symlinked parents. Added asserts in section 17 (Exec Safety) for `> /dev/null` allowed, `dd if=/dev/zero of=/dev/sda` blocked, `rm /` blocked, `rm /tmp/foo` allowed, `wget http://...` blocked, `curl http://...` blocked.
+
+**Companion Python fixes** (in `clawagents_py` v6.3.0): multimodal system message context shedding, parallel native tool-call indexing under `before_tool` hooks, subagent env-mutation race under `credential_proxy`, `BaseException` widening for `CancelledError` classification, Gemini provider `None`-parts iteration. Plus a full mypy cleanup (46 errors → 0).
+
 ### v6.2.2 — Dependency Audit Cleanup
 
 Patch release for the TypeScript package dependency tree.
