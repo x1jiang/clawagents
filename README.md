@@ -1,6 +1,6 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.2.1**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.2.2**
 
 ## Installation
 
@@ -569,6 +569,14 @@ All environment variables are **optional**. They serve as defaults when the corr
 | `CLAW_HOOK_POST_LLM` | Shell command after each LLM response. Fire-and-forget logging. |
 
 ## Changelog
+
+### v6.2.2 — Dependency Audit Cleanup
+
+Patch release for the TypeScript package dependency tree.
+
+- Removed `byterover-cli` from optional runtime dependencies; it pulled in bundled `socket.io-parser@4.2.4` and older Vertex/Google auth dependencies that were not required by ClawAgents runtime.
+- Refreshed `package-lock.json` so `protobufjs`, `minimatch`, and `brace-expansion` resolve to patched versions.
+- `npm audit` now reports **0 vulnerabilities**.
 
 ### v6.2.1 — npm Packaging, Redirect-Safe `web_fetch`, and Release CI
 

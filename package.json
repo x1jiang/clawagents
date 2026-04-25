@@ -1,6 +1,6 @@
 {
   "name": "clawagents",
-  "version": "6.2.1",
+  "version": "6.2.2",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
   "type": "module",
   "main": "./dist/index.js",
@@ -60,11 +60,11 @@
   "optionalDependencies": {
     "@anthropic-ai/sdk": ">=0.30.0",
     "@google/genai": "^1.9.0",
-    "byterover-cli": "^1.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^25.3.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
