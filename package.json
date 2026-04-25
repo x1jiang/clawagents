@@ -1,15 +1,43 @@
 {
   "name": "clawagents",
-  "version": "6.2.0",
+  "version": "6.2.1",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
-  "main": "src/index.ts",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "clawagents": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "npx tsx src/index.ts",
-    "dev": "npx tsx --watch src/index.ts",
-    "task": "npx tsx src/index.ts --task",
-    "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "start": "npx tsx src/cli.ts",
+    "dev": "npx tsx --watch src/cli.ts",
+    "task": "npx tsx src/cli.ts --task",
+    "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/web.test.ts tests/simulated.test.ts",
+    "test:surfaces": "tsx tests/openai_agents_surfaces.test.ts",
+    "test:all": "npm run test && npm run test:surfaces",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
     "agent",
@@ -31,7 +59,8 @@
   "optionalDependencies": {
     "@anthropic-ai/sdk": ">=0.30.0",
     "@google/genai": "^1.9.0",
-    "byterover-cli": "^1.0.0"
+    "byterover-cli": "^1.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^25.3.0",

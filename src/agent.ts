@@ -543,10 +543,17 @@ async function resolveModel(
 
     const activeModel = (typeof model === "string" && model) ? model : getDefaultModel(config);
 
-    // Override the appropriate API key if provided
+    // Override the appropriate API key if provided.
+    // Route by model family so a single `apiKey` parameter targets the
+    // correct provider config field. Without this, e.g. a Claude key
+    // silently lands in `openaiApiKey` and the Anthropic provider falls
+    // back to the env var.
     if (apiKey) {
-        if (activeModel.toLowerCase().startsWith("gemini")) {
+        const lower = activeModel.toLowerCase();
+        if (lower.startsWith("gemini")) {
             config.geminiApiKey = apiKey;
+        } else if (lower.startsWith("claude") || lower.startsWith("anthropic")) {
+            config.anthropicApiKey = apiKey;
         } else {
             config.openaiApiKey = apiKey;
         }

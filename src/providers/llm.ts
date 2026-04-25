@@ -968,6 +968,11 @@ function looksLikeOllama(modelName: string): boolean {
  * - everything else → OpenAIProvider (OpenAI or user-configured base URL)
  */
 export async function createProvider(modelName: string, config: EngineConfig): Promise<LLMProvider> {
+    // Clone to avoid mutating the caller's shared EngineConfig. Routing
+    // sets provider-specific fields (model, base URL, fallback API key);
+    // mutating a shared object causes cross-talk when the same config is
+    // reused across providers (e.g. main + advisor) or in concurrent flows.
+    config = { ...config };
     const lower = modelName.toLowerCase();
     if (lower.startsWith("gemini")) {
         const GenAI = await getGoogleGenAI();

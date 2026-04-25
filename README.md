@@ -1,10 +1,14 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.2.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.2.1**
 
 ## Installation
 
 ```bash
+# From npm (recommended once published)
+npm install clawagents
+
+# Or directly from GitHub (HEAD of main)
 npm install git+https://github.com/x1jiang/clawagents.git
 ```
 
@@ -229,30 +233,34 @@ console.log(result.bestScore);   // objective score
 
 ```bash
 # Check your configuration
-npx tsx src/index.ts --doctor
+clawagents --doctor
 
 # Run a task directly
-npx tsx src/index.ts --task "Find all TODO comments in the codebase"
+clawagents --task "Find all TODO comments in the codebase"
 
 # Inspect past run trajectories
-npx tsx src/index.ts --trajectory        # last run
-npx tsx src/index.ts --trajectory 5      # last 5 runs
+clawagents --trajectory        # last run
+clawagents --trajectory 5      # last 5 runs
 
 # Start the gateway server
-npx tsx src/index.ts --port 3000
+clawagents --port 3000
 
 # Show all options
-npx tsx src/index.ts --help
+clawagents --help
+
+# Or, in a checkout of this repo (no install required):
+npx tsx src/cli.ts --doctor
+npx tsx src/cli.ts --task "..."
 ```
 
 ### Typical First-Time Flow
 
 ```bash
-npm install git+https://github.com/x1jiang/clawagents.git   # 1. Install
+npm install clawagents                                       # 1. Install
 cp .env.example .env                                         # 2. Create config
 # edit .env with your API key                                # 3. Configure
-npx tsx src/index.ts --doctor                                # 4. Verify setup
-npx tsx src/index.ts --task "hello world"                    # 5. Run first task
+clawagents --doctor                                          # 4. Verify setup
+clawagents --task "hello world"                              # 5. Run first task
 ```
 
 ### CLI Reference
@@ -464,6 +472,28 @@ Run summaries appended to `.clawagents/trajectories/runs.jsonl`:
 }
 ```
 
+## Trust Boundaries & Hardening
+
+A few surfaces are deliberately powerful — they exist for trusted operators,
+and you should treat them as such when running ClawAgents in environments
+with untrusted prompts or LAN exposure:
+
+- **`exec_shell` tool** — runs arbitrary commands inside the configured
+  sandbox. Pair with `LocalBackend({ cwd })` constraints and ideally a
+  containerized runtime; the tool's blocklist is a guardrail, not a
+  security boundary.
+- **External hooks** (`CLAW_FEATURE_EXTERNAL_HOOKS=1`, `CLAW_HOOK_*`)
+  execute shell commands defined in your env or `.clawagents/hooks.json`.
+  Anyone who controls those configs has code execution. Treat hooks as
+  **trusted-only**.
+- **`web_fetch` tool** — refuses loopback / RFC1918 / link-local /
+  multicast IPs by default to block SSRF. Set
+  `CLAWAGENTS_WEB_ALLOW_PRIVATE=1` only in trusted dev environments.
+- **Gateway** — defaults to loopback (`127.0.0.1`) bind. Set
+  `GATEWAY_HOST=0.0.0.0` to expose on LAN, and **always** set
+  `GATEWAY_API_KEY=<secret>` when you do — startup will warn loudly
+  otherwise.
+
 ## Environment Variables
 
 All environment variables are **optional**. They serve as defaults when the corresponding `createClawAgent()` parameter is not provided. Explicit parameters always take priority.
@@ -540,6 +570,16 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.2.1 — npm Packaging, Redirect-Safe `web_fetch`, and Release CI
+
+Patch release focused on making the TypeScript package install cleanly as a normal npm/GitHub dependency and keeping parity with the Python sibling.
+
+- **Standard npm package layout** — `package.json` now points `main`, `types`, `exports`, and `bin` at built `dist/` artifacts. `src/index.ts` is a side-effect-free library entrypoint; CLI runtime lives in `src/cli.ts`.
+- **Build and publish guardrails** — `tsconfig.build.json` emits JS + declarations, `scripts/postbuild.mjs` ensures the CLI has a shebang and executable bit, and `prepublishOnly` rebuilds before release.
+- **Install smoke in CI** — GitHub Actions now builds a tarball, installs it into a fresh consumer project, imports `clawagents`, verifies public exports, and runs the `clawagents` binary.
+- **Redirect-aware SSRF protection** — `webFetchTool` uses manual redirects with per-hop validation and a 5-hop limit, blocking public-to-private redirect bypasses.
+- **Parity and test coverage** — `scripts/smoke-gemma4.ts` mirrors `clawagents_py/scripts/smoke_gemma4.py`; `npm run typecheck` is clean and `npm test` reports **115 passed**.
+
 ### v6.2.0 — OpenAI-Agents Parity, Ollama/Gemma4 First-Class Routing, 63 Model Profiles
 
 Additive release — mirrors the Python sibling [clawagents (PyPI)](https://pypi.org/project/clawagents/). Everything is backward compatible.
@@ -576,7 +616,7 @@ Override with `OPENAI_BASE_URL` if Ollama runs on a different host/port. API key
 
 `MODEL_PROFILES` now covers frontier (GPT-5.4 → 400K, Gemini 3.1 → 1M, Claude 4.6 Opus), Ollama (Gemma4 e2b/e4b → 128K, 26b/31b → 256K), and a long tail of OSS variants. `resolveContextBudget()` walks insertion order for deterministic prefix matching (most-specific first) — identical to the Python sibling.
 
-**4. Cross-package parity** — the Python sibling [`clawagents` on PyPI](https://pypi.org/project/clawagents/) has the identical 24-entry Ollama prefix list, 63-entry model profile table with the same (window, ratio) values, and the same `create_provider` routing logic.
+**4. Cross-package parity** — the Python sibling [`clawagents` on PyPI](https://pypi.org/project/clawagents/) has the identical 24-entry Ollama prefix list, 63-entry model profile table with the same (window, ratio) values, and the same `create_provider` routing logic. Parity can be exercised manually with the matching smoke scripts in each repo (`clawagents/scripts/smoke-gemma4.ts` and `clawagents_py/scripts/smoke_gemma4.py`); both print the same provider, base URL and stored model for `gemma4:*`, `ollama/...`, `gpt-5.4`, `gemini-3.1-pro` and `claude-opus-4-6`. The GitHub Actions workflow added in v6.2.1 runs `npm run typecheck`, `npm run build`, `node --test`, and a real install-from-tarball + `import 'clawagents'` smoke on every push.
 
 **5. Quality / debug pass**
 

@@ -34,11 +34,27 @@ function resolveLane(raw?: string): string {
     return VALID_LANES.has(lane) ? lane : CommandLane.Main;
 }
 
-export async function startGateway(port: number = 3000) {
+/** Hosts that are local to this machine and safe by default. */
+const LOOPBACK_HOSTS = new Set<string>(["127.0.0.1", "localhost", "::1"]);
+
+/**
+ * Bind address resolution:
+ *   1. ``GATEWAY_HOST`` env var if set (explicit operator intent).
+ *   2. ``host`` argument to ``startGateway`` (programmatic override).
+ *   3. ``127.0.0.1`` — fail-safe default. Previous releases bound to all
+ *      interfaces, which silently exposes an unauthenticated gateway on
+ *      LAN/Wi-Fi when ``GATEWAY_API_KEY`` is unset.
+ */
+function resolveBindHost(host?: string): string {
+    return process.env["GATEWAY_HOST"] || host || "127.0.0.1";
+}
+
+export async function startGateway(port: number = 3000, host?: string) {
     const config = loadConfig();
     const activeModel = getDefaultModel(config);
     const llm = await createProvider(activeModel, config);
     const gatewayApiKey = process.env["GATEWAY_API_KEY"] ?? "";
+    const bindHost = resolveBindHost(host);
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
         try {
@@ -59,13 +75,30 @@ export async function startGateway(port: number = 3000) {
         ? detectedChannels.map(c => c.description).join(", ")
         : "none (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)";
 
-    server.listen(port, async () => {
-        console.log(`\n🦞 ClawAgents Gateway running on http://localhost:${port}`);
+    server.listen(port, bindHost, async () => {
+        const isLoopback = LOOPBACK_HOSTS.has(bindHost);
+        const displayHost = isLoopback ? "localhost" : bindHost;
+        console.log(`\n🦞 ClawAgents Gateway running on http://${displayHost}:${port}`);
         console.log(`   Provider: ${llm.name}`);
         console.log(`   Model: ${activeModel}`);
+        console.log(`   Bind: ${bindHost}${isLoopback ? " (loopback)" : " (network-reachable)"}`);
         console.log(`   Auth: ${authStatus}`);
         console.log(`   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health`);
-        console.log(`   Channels: ${channelDesc}\n`);
+        console.log(`   Channels: ${channelDesc}`);
+
+        if (!isLoopback && !gatewayApiKey) {
+            console.warn(
+                "\n⚠️  WARNING: gateway is bound to a non-loopback address with auth disabled.",
+            );
+            console.warn(
+                "   This exposes /chat, /chat/stream, and /ws to anyone who can reach this host.",
+            );
+            console.warn(
+                "   Set GATEWAY_API_KEY=<secret> to require Bearer auth, or unset GATEWAY_HOST to bind to 127.0.0.1.\n",
+            );
+        } else {
+            console.log("");
+        }
 
         if (detectedChannels.length > 0) {
             try {

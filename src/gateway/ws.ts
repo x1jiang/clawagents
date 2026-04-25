@@ -44,7 +44,7 @@ function getOrCreateSession(sessionId: string): SessionEntry {
 export function attachWebSocket(httpServer: HttpServer, llm: LLMProvider, gatewayApiKey: string) {
     let WebSocketServerCtor: typeof import("ws").WebSocketServer | undefined;
     try {
-        // ws is a peer dependency — degrade gracefully if not installed
+        // ws is an optional dependency — degrade gracefully if not installed
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const wsModule = require("ws") as typeof import("ws");
         WebSocketServerCtor = wsModule.WebSocketServer ?? (wsModule as any).Server;

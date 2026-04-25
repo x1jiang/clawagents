@@ -5,6 +5,21 @@
  * environment variables. They run before/after tool execution and LLM calls,
  * receiving JSON on stdin and returning JSON on stdout.
  *
+ * Security note — hooks are a TRUSTED-ONLY surface
+ * -------------------------------------------------
+ * Anyone who can write to `.clawagents/hooks.json` or set `CLAW_HOOK_*`
+ * environment variables effectively has shell-level code execution inside the
+ * agent process: the strings configured there are passed straight to
+ * `child_process.spawn` and run with the agent's full privileges.
+ *
+ * Hooks are off by default and only loaded when `CLAW_FEATURE_EXTERNAL_HOOKS`
+ * is set to `1`/`true`/`yes`. Treat hook config the same way you treat
+ * `.bashrc` or a CI deploy key:
+ *   - never load hooks from untrusted `cwd`s,
+ *   - never let untrusted users edit `.clawagents/hooks.json`,
+ *   - don't echo or commit hook commands that contain secrets,
+ *   - prefer absolute paths to your hook scripts and pin them in version control.
+ *
  * Inspired by claw-code-main's hook system.
  */
 
