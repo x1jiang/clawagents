@@ -1,15 +1,20 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.5.0**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.0**
 
-> **v6.5.0 (April 2026)** — Hermes-inspired hardening release. Subagent depth
-> limits, memory-isolated forks, activity heartbeats, per-agent
-> `IterationBudget`, path-scoped parallel tool execution, full plugin hook
-> expansion (`preTool` veto + `transformToolResult` + `beforeLLM`), runtime
-> `displayClawagentsHome()`, hermetic test runner with pinned `tsx --test`
-> concurrency, prompt-cache-aware `CommandDef` (`--now` parsing +
-> `cacheImpact`), and a documented prompt-cache policy. **370 tests** pass,
-> `tsc --noEmit` clean. See [Changelog](#changelog).
+> **v6.6.0 (April 2026)** — Hermes-parity feature release. Native **browser
+> tools** (Playwright local + cloud provider stubs, accessibility-tree
+> snapshots, surgical `click`/`type`/`fillForm`/`navigate`/`scroll`/
+> `waitForSelector` action set), built-in **cron / scheduler** (interval,
+> one-shot, and cron expressions, JSON-persisted job store, `runDue` driver
+> with structured `JobNotifier` events), **ACP adapter** (`AcpServer.serve()`
+> bridges any ClawAgents agent to Zed's Agent Client Protocol over stdio
+> with per-session prompt runners), and **RL fine-tuning hooks** (`RLRecorder`
+> + `Trajectory` data model, pluggable `RewardScorer`s, `TrlAdapter` /
+> `AtroposAdapter` exporters with TRL-SFT / TRL-DPO / Atropos rollout /
+> generic JSONL output). All four ports landed on **both** TypeScript and
+> Python with mirrored APIs. **478 tests** pass, `tsc --noEmit` clean. See
+> [Changelog](#changelog).
 
 ## Installation
 
@@ -764,6 +769,79 @@ All environment variables are **optional**. They serve as defaults when the corr
 ---
 
 ## Changelog
+
+### v6.6.0 — Hermes-parity feature release: browser tools, scheduler, ACP, RL hooks (April 2026)
+
+Feature release. Four big Hermes-side capabilities now ship on both
+TypeScript and Python ports, each behind an optional dependency so the
+core install stays slim. Test totals after this release: **TypeScript
+478 passed**, **Python 762 passed**, `tsc --noEmit` clean, mypy clean.
+
+- **🌐 Browser tools** (`clawagents/browser`) — Playwright-driven
+  browser control for agents that need to read or interact with the
+  live web. `BrowserSession` exposes a stable async API
+  (`navigate` / `snapshot` / `click` / `typeText` / `fillForm` /
+  `scroll` / `waitForSelector` / `screenshot` / `close`) over a
+  pluggable provider (`LocalProvider` for Playwright;
+  `BrowserbaseProviderStub` / `BrowserUseProviderStub` ready to be
+  filled in for cloud back-ends). `createBrowserTools()` adapts the
+  session into ClawAgents tools with per-action accessibility-tree
+  snapshots so the model sees the page through the same axtree Hermes
+  uses. Playwright is an optional peer (`npm install playwright`);
+  importing the module without it works fine — only `session.start()`
+  raises `MissingPlaywrightError`. `MAX_NODES = 800`-cap on snapshots,
+  navigation allow-/deny-lists, and a `renderSnapshot()` helper for
+  prompt-friendly trees.
+- **⏰ Cron / scheduled jobs** (`clawagents/cron`) — minimal but
+  production-shaped scheduler for agent-driven cron, one-shots, and
+  intervals. `parseSchedule()` handles `every 30s`, `at
+  2026-04-23T18:00`, and 5-field cron expressions; cron support uses
+  the optional `cron-parser` peer and degrades cleanly when missing.
+  `Scheduler` provides `createJob` / `getJob` / `pauseJob` /
+  `resumeJob` / `triggerJob` / `removeJob` plus a `runDue` driver that
+  emits `JobNotifier` events (`job_started`, `job_finished`,
+  `job_failed`, `job_skipped`). Job store is plain JSON on disk;
+  runners can be any callable, so users can wire it to
+  `agent.invoke(...)` or shell. Mirrors Hermes' "agents as a workflow
+  engine" pattern.
+- **🔌 ACP adapter** (`clawagents/acp`) — bridges any ClawAgents agent
+  to **Zed's Agent Client Protocol** over stdio so editors / IDEs that
+  speak ACP can drive a ClawAgents agent the same way they drive
+  Claude Code or Codex. `AcpServer.serve()` registers an
+  `AgentSessionFactory`, accepts ACP `initialize` / `newSession` /
+  `prompt` / `cancel` requests, and translates ClawAgents stream
+  events into ACP `session/update` messages
+  (`agent_message_chunk`, `agent_thought_chunk`, `tool_call.start` /
+  `.complete`, `permission`). Per-session `AgentSession` wraps prompt
+  history, permission callbacks, and `StopReason` propagation. The
+  optional `@zed-industries/agent-client-protocol` package is loaded
+  lazily — importing `clawagents/acp` works without it; only
+  `serve()` raises `MissingAcpDependencyError`. Round-trip tested
+  against Hermes' reference message shape.
+- **🎯 RL fine-tuning hooks** (`clawagents/rl`) — capture live agent
+  runs as training-ready trajectories and export them to **TRL**,
+  **Atropos**, **SLIME**, or generic JSONL. `RLRecorder` plugs into
+  `agent.onEvent` and assembles a `Trajectory` (system / user /
+  assistant + `tool_calls` / tool messages) in correct ChatML order,
+  with config knobs for `maxToolResultChars`, `redactToolArgs`, and
+  `captureSystemPrompt`. Pluggable `RewardScorer`s (`containsScorer`,
+  `exactMatchScorer`, `regexScorer`, `lengthPenaltyScorer`,
+  `compositeScorer`) attach a scalar reward + per-component
+  breakdown. Export helpers: `exportJsonl`, `toChatML`, `toTrlSft`,
+  `toTrlDpo`, `toAtroposRollout`. Because TRL/Atropos are Python-only,
+  the TypeScript adapters either produce JSONL files for downstream
+  Python trainers (`TrlAdapter.writeSftJsonl`) or stream Atropos
+  rollouts over HTTP (`AtroposAdapter.submit`) — the user's runtime
+  never has to import a Python training library.
+
+**Backwards compatibility:** All four features are additive and
+opt-in. Importing the new submodules has no side effects; nothing in
+the core `createClawAgent()` / `agent.invoke()` path changed. The
+optional peers (`playwright`, `cron-parser`,
+`@zed-industries/agent-client-protocol`) are only required at the
+moment you actually `session.start()` / parse a cron expression /
+`serve()` over ACP. RL adapters have **zero** runtime dependencies —
+they use plain `fetch` for Atropos and write JSONL for TRL/SLIME.
 
 ### v6.5.0 — Hermes-inspired hardening: depth, isolation, heartbeats, path-scoped parallelism (April 2026)
 

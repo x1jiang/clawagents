@@ -261,3 +261,162 @@ export type {
     JobNotifier,
     StartOptions as BackgroundStartOptions,
 } from "./background.js";
+
+// ── Browser tools (v6.6) ─────────────────────────────────────────────
+// Playwright is an optional peer dependency — `import` works without it,
+// only `BrowserSession.start()` throws if the runtime is missing.
+export {
+    BrowserSession,
+    BrowserError,
+    ElementNotFoundError,
+    MissingPlaywrightError,
+    NavigationBlockedError,
+    SnapshotError,
+    LocalProvider,
+    BrowserbaseProviderStub,
+    BrowserUseProviderStub,
+    getProvider as getBrowserProvider,
+    createBrowserTools,
+    renderSnapshot,
+    MAX_NODES as BROWSER_SNAPSHOT_MAX_NODES,
+    resolveBrowserConfig,
+    checkUrl as checkBrowserUrl,
+} from "./browser/index.js";
+export type {
+    BrowserConfig,
+    ResolvedBrowserConfig,
+    BrowserHandle,
+    BrowserSnapshot,
+    SnapshotElement,
+    AxNode,
+    CloudBrowserProvider,
+    CreateBrowserToolsOptions,
+} from "./browser/index.js";
+
+// ── Cron / scheduled jobs (v6.6) ─────────────────────────────────────
+// Interval and one-shot schedules work out of the box. Cron expressions
+// require the optional `cron-parser` peer (`npm install cron-parser`).
+export {
+    Scheduler,
+    SchedulerError,
+    CRONITER_AVAILABLE,
+    parseDuration,
+    parseSchedule,
+    computeNextRun,
+    createJob,
+    getJob,
+    listJobs,
+    updateJob,
+    pauseJob,
+    resumeJob,
+    triggerJob,
+    removeJob,
+    markJobRun,
+    advanceNextRun,
+    getDueJobs,
+    saveJobOutput,
+    loadJobs,
+    saveJobs,
+} from "./cron/index.js";
+export type {
+    Job,
+    JobRepeat,
+    JobRunner,
+    ParsedSchedule,
+    ScheduleKind,
+    SchedulerOptions,
+    SchedulerStats,
+    CreateJobOptions,
+    UpdateJobInput,
+} from "./cron/index.js";
+
+// ── ACP adapter (v6.6) ───────────────────────────────────────────────
+// Bridges a ClawAgents agent to Zed's Agent Client Protocol over stdio.
+// Only `AcpServer.serve()` requires the optional
+// `@zed-industries/agent-client-protocol` package.
+export {
+    AcpError,
+    MissingAcpDependencyError,
+    StopReasonValues,
+    agentMessageChunk,
+    agentThoughtChunk,
+    decodeUpdate,
+    encodeUpdate,
+    permissionDecisionFromDict,
+    promptFromDict,
+    promptToDict,
+    toolCallStart,
+    AgentSession,
+    AcpServer,
+    ACP_AVAILABLE,
+    defaultRunner as acpDefaultRunner,
+    serve as acpServe,
+} from "./acp/index.js";
+export type {
+    AgentMessageChunk,
+    AgentThoughtChunk,
+    PermissionDecision,
+    PermissionRequest,
+    PromptRequest,
+    SessionUpdate,
+    StopReason,
+    ToolCallComplete,
+    ToolCallStart,
+    PermissionRequester,
+    SessionEventSink,
+    AgentSessionOptions,
+    AcpServerOptions,
+    AgentLike as AcpAgentLike,
+    PromptRunner,
+} from "./acp/index.js";
+
+// ── RL fine-tuning hooks (v6.6) ──────────────────────────────────────
+// Capture agent runs as training-ready trajectories and export them to
+// TRL / Atropos / SLIME / generic JSONL formats. No training framework
+// is imported here — the adapters either produce JSONL (for downstream
+// Python trainers) or stream rollouts over HTTP.
+export {
+    RLError,
+    MissingRLDependencyError,
+    Trajectory as RLTrajectory,
+    trajectoryStep as rlTrajectoryStep,
+    toolCall as rlToolCall,
+    toolCallToJson as rlToolCallToJson,
+    toolCallFromJson as rlToolCallFromJson,
+    stepToJson as rlStepToJson,
+    stepFromJson as rlStepFromJson,
+    RLRecorder,
+    containsScorer,
+    exactMatchScorer,
+    regexScorer,
+    lengthPenaltyScorer,
+    compositeScorer,
+    scoreAll,
+    exportJsonl as rlExportJsonl,
+    loadJsonl as rlLoadJsonl,
+    toChatML as rlToChatML,
+    toTrlSft,
+    toTrlDpo,
+    toAtroposRollout,
+    exportTrlSftJsonl,
+    exportAtroposRolloutsJsonl,
+    TrlAdapter,
+    AtroposAdapter,
+    TRL_AVAILABLE,
+    ATROPOS_AVAILABLE,
+    FETCH_AVAILABLE as RL_FETCH_AVAILABLE,
+} from "./rl/index.js";
+export type {
+    TrajectoryRole as RLTrajectoryRole,
+    TrajectoryStep as RLTrajectoryStep,
+    ToolCall as RLToolCall,
+    RecorderConfig as RLRecorderConfig,
+    RewardScorer,
+    ContainsScorerOptions,
+    ExactMatchScorerOptions,
+    RegexScorerOptions,
+    LengthPenaltyScorerOptions,
+    CompositeScorerOptions,
+    AtroposSink,
+    AtroposSubmitOptions,
+} from "./rl/index.js";
