@@ -664,6 +664,13 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.4.1 — Public-API export polish (no behavior change)
+
+Patch release. Surfaces `PromptHook`, `PromptHookVerdict`, and `parseVerdict`
+at the top-level `clawagents` package so users can `import { PromptHook } from
+"clawagents"` instead of reaching into `clawagents/dist/hooks/prompt-hook.js`.
+No code-path changes; both ports remain at 226/516 passing.
+
 ### v6.4.0 — Tracing, MCP, Handoffs, Plan Mode (April 2026)
 
 Big feature release. Nine new subsystems shipped on **both** Python and TypeScript ports — every change comes with regression tests on both. Test totals: **TypeScript 226 passed**, **Python 516 passed**, `tsc --noEmit` clean, mypy clean.

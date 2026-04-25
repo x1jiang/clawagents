@@ -101,6 +101,10 @@ export type { ErrorDescriptor, RecoveryRecipe } from "./errors/taxonomy.js";
 export { ExternalHookRunner, loadHooksConfig, runHook } from "./hooks/external.js";
 export type { HooksConfig } from "./hooks/external.js";
 
+// PromptHook (LLM-evaluated guardrail, v6.4)
+export { PromptHook, parseVerdict } from "./hooks/prompt-hook.js";
+export type { PromptHookVerdict, PromptHookOptions } from "./hooks/prompt-hook.js";
+
 // Session Persistence
 export { SessionWriter, SessionReader, listSessions } from "./session/persistence.js";
 export type { SessionInfo, SessionEvent } from "./session/persistence.js";
