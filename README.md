@@ -1,14 +1,15 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.4.0**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.5.0**
 
-> **v6.4.0 (April 2026)** — Big feature release. Hierarchical tracing
-> infrastructure, MCP client (stdio + SSE + Streamable-HTTP), handoffs +
-> `Agent.asTool()`, Exec Safety v2 (Plan Mode + bash validator + obfuscation
-> detector), expanded hook taxonomy + LLM-evaluated `PromptHook`,
-> AskUserQuestion structured HITL, settings hierarchy, image sanitization,
-> mock-provider parity harness. **226 tests** pass, `tsc --noEmit` clean.
-> See [Changelog](#changelog).
+> **v6.5.0 (April 2026)** — Hermes-inspired hardening release. Subagent depth
+> limits, memory-isolated forks, activity heartbeats, per-agent
+> `IterationBudget`, path-scoped parallel tool execution, full plugin hook
+> expansion (`preTool` veto + `transformToolResult` + `beforeLLM`), runtime
+> `displayClawagentsHome()`, hermetic test runner with pinned `tsx --test`
+> concurrency, prompt-cache-aware `CommandDef` (`--now` parsing +
+> `cacheImpact`), and a documented prompt-cache policy. **370 tests** pass,
+> `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ## Installation
 
@@ -664,6 +665,37 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.5.0 — Hermes-inspired hardening: depth, isolation, heartbeats, path-scoped parallelism (April 2026)
+
+Architecture/correctness release. Ten patterns ported from the Hermes agent are
+now live on **both** TypeScript and Python ports — every change comes with
+regression tests on both. Test totals after this release: **TypeScript 370
+passed**, **Python 662 passed**, `tsc --noEmit` clean, mypy clean.
+
+**Tier 1 — runtime safety & isolation:**
+
+- **🪜 Subagent depth limits** (`graph/coordinator`, `tools/subagent`, `graph/forked-agent`) — `RunContext` now tracks `subagentDepth`. The `task` tool refuses to delegate when the parent is already at `depth >= 2`, returning a structured error instead of silently spawning a third tier. Forks inherit the depth counter; the cap mirrors Hermes' "no recursive delegation" rule and prevents exponential subagent fan-out.
+- **🧠 Memory-isolated forks/subagents** (`graph/forked-agent`, `memory/loader`) — both `runForkedAgent` and the built-in `task` tool now accept `skipMemory: true` (default for forks). When set, memory loaders are bypassed so a sandboxed fork cannot see the parent's `AGENTS.md`/skills/notes. Forks also get their own `IterationBudget` so a runaway research fork cannot starve the parent's remaining turns.
+- **💓 Activity heartbeats** (`session/heartbeat`, `gateway/server`, `graph/agent-loop`) — long-running tool calls now emit periodic `tool_heartbeat` events (`tool_name`, `call_id`, `elapsed_s`) every ~20s through `runWithHeartbeat`. Gateway clients use these to keep WebSocket channels alive and surface progress, eliminating false timeouts on slow shell/web/sandbox calls. Best-effort: emitter exceptions are swallowed so they never mask the real result.
+- **⏱️ Per-agent IterationBudget** (`iteration-budget`, `graph/agent-loop`, `graph/forked-agent`) — replaces the implicit `maxTurns` counter with an explicit `IterationBudget` object that lives on `RunContext`. Subagents and forks each get their own budget sized from `delegation.maxIterations` (default `DEFAULT_DELEGATION_MAX_ITERATIONS`), so one chatty fork can't drain the parent's turn pool. Surfaces the same `consume()`/`refund()`/`exhausted` shape Hermes uses, making it easy to tee budgets across recursive delegation.
+- **🌿 Path-scoped parallel tool execution** (`tools/registry`) — `executeToolsParallel` no longer fans out blindly. The `Tool` interface gained `parallelSafe?: boolean` and `pathScopedArg?: string`; the registry partitions calls into ordered batches so reads run concurrently while any writer or path-scope collision serialises behind them. Capped at `MAX_PARALLEL_TOOL_WORKERS = 8` to keep file-handle pressure bounded. Mirrors Hermes' parallel-read / serial-write contract.
+
+**Tier 2 — extensibility & cache-discipline:**
+
+- **🔌 Plugin hook expansion** (`plugins`) — new top-level `Plugin` + `PluginManager` (`import { Plugin, PluginManager } from "clawagents"`). Plugins compose three hook families with priority-based ordering: `preTool` (first-deny veto / args-rewrite, alias `beforeTool`), `transformToolResult` (sequential post-execution rewrite, alias `afterTool`), and `beforeLLM` (prompt-massage). Replaces the previous "single hook wins" model with a deterministic chain that's easy to unit-test.
+- **📁 `displayClawagentsHome()`** (`paths`) — runtime helper that resolves the package install root and rewrites it to a placeholder (`<clawagents-home>`) for tool descriptions, error messages, and traces. Makes prompt cache hits stable across user homes / dev / CI by stripping absolute paths from anything that ends up in the LLM context window.
+- **🧊 Prompt-cache-aware `CommandDef`** (`commands`) — slash-command definitions now carry an explicit `cacheImpact` (`"none" | "soft_break" | "hard_break"`) and parse a `--now` flag (`/skills install foo --now`) so users can opt into immediate state mutation; default is `cacheImpact: "none"`, `--now` upgrades to `"hard_break"` and forces a fresh prompt build. Mirrors Hermes' "deferred by default to preserve prompt cache" contract.
+- **📜 Prompt-cache policy** (`AGENTS.md`) — new top-level rule documents the cache invariants (stable system prompt prefix, no per-turn timestamps in cached blocks, deferred slash-command state mutations, `displayClawagentsHome()` for paths) so contributors keep the cache hit rate above the 80%+ Hermes target.
+
+**Tier 3 — testing infrastructure:**
+
+- **🧪 Hermetic test runner + pinned concurrency** (`scripts/run_tests.sh`, `package.json`) — canonical CI-mirrored runner that pins `tsx --test --test-concurrency=4` (override via `CLAW_TEST_WORKERS`), forces `TZ=UTC` / `LANG=C.UTF-8` / `NODE_ENV=test`, and scrubs every credential + `CLAW_*` env var before `node:test` sees it. Available via `npm run test:hermetic`. Mirrored by `clawagents_py/scripts/run_tests.sh` for the Python port (`pytest -n 4` via `pytest-xdist`).
+
+**Backwards compatibility:** All 10 features are additive. Existing
+`createClawAgent()` / `agent.invoke()` call sites keep working; the new
+machinery activates automatically (depth tracking, heartbeats, parallel-safe
+tagging) or via opt-in (`Plugin`, `--now`, `skipMemory`, `IterationBudget`).
+
 ### v6.4.1 — Public-API export polish (no behavior change)
 
 Patch release. Surfaces `PromptHook`, `PromptHookVerdict`, and `parseVerdict`
@@ -1059,10 +1091,14 @@ await router.startAll({
 ```bash
 npm install
 
-# Run the full test suite (expected: 121 passed on v6.3.0)
+# Run the full test suite (expected: 370 passed, 4 skipped on v6.5.0)
 npm test
 
-# Type-check without emitting (expected: clean, exit 0 on v6.3.0)
+# Hermetic runner — exactly the environment CI uses (pinned
+# --test-concurrency=4, TZ=UTC, NODE_ENV=test, credentials scrubbed)
+npm run test:hermetic
+
+# Type-check without emitting (expected: clean, exit 0 on v6.5.0)
 npm run typecheck
 
 # Build dist/ (runs typecheck under the hood)
@@ -1072,7 +1108,10 @@ npm run build
 npx tsx --test src/tools/registry.test.ts
 ```
 
-The `web.test.ts` and `simulated.test.ts` suites cover every bug fixed in
-v6.3.0: symlink-escape blocking via the real `LocalBackend.safePath`, full
-`fe80::/10` IPv6 link-local matching, and the exec denylist (`> /dev/null`,
-`rm /`, `wget http`, `curl http`).
+The v6.5.0 suite adds dedicated regression coverage for the Hermes-inspired
+patterns: `src/tools/subagent.test.ts` (depth limits + memory isolation),
+`src/paths.test.ts` (`displayClawagentsHome()`), `src/commands.test.ts`
+(`cacheImpact` + `--now`), `src/redact.test.ts`, `src/transport.test.ts`,
+`src/aux-models.test.ts`, `src/background.test.ts`, `src/steer.test.ts`, and
+`src/mcp/env-scrub.test.ts`, alongside the existing `web.test.ts` /
+`simulated.test.ts` parity sweep.

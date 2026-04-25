@@ -12,8 +12,18 @@
  * only ``args`` continue to work unchanged.
  */
 
+import { IterationBudget } from "./iteration-budget.js";
 import { PermissionMode } from "./permissions/mode.js";
 import { Usage } from "./usage.js";
+
+/**
+ * Maximum nesting depth for sub-agent delegation. Mirrors Hermes' policy:
+ * a subagent (depth=1) may not itself spawn another subagent (depth=2 is the
+ * hard cap; the `task` tool refuses any new spawn when
+ * `depth >= MAX_SUBAGENT_DEPTH`). Bounds worst-case token / iteration / time
+ * blowup of recursive delegation.
+ */
+export const MAX_SUBAGENT_DEPTH = 2;
 
 /** Per-call-ID approval decision for a tool call. */
 export interface ApprovalRecord {
@@ -38,6 +48,27 @@ export class RunContext<TContext = unknown> {
      * gate write-class tools when in PLAN mode.
      */
     public permissionMode: PermissionMode;
+    /**
+     * Sub-agent nesting depth. `0` for the top-level / user-facing run,
+     * `1` for a first-level subagent, `2` for a sub-subagent (capped at
+     * {@link MAX_SUBAGENT_DEPTH}). The `task` tool refuses to spawn when
+     * `depth >= MAX_SUBAGENT_DEPTH`.
+     */
+    public depth: number;
+    /**
+     * When `true`, the agent loop and any memory loaders skip reading the
+     * parent's memory directory, lessons, and persisted skill state.
+     * Sub-agent runs default to `true` so they remain isolated.
+     */
+    public skipMemory: boolean;
+    /**
+     * Optional per-agent iteration budget. When set, the agent loop
+     * consumes one unit per round and stops when the budget is exhausted,
+     * even if `maxIterations` would still allow more rounds. Each
+     * subagent gets a *fresh* budget so a runaway delegate cannot starve
+     * the parent run. Mirrors Hermes' ``IterationBudget``.
+     */
+    public iterationBudget: IterationBudget | undefined;
     /** Per-call-ID approvals. */
     public _approvals: Map<string, ApprovalRecord>;
     /** "Always approve/reject" decisions keyed by tool name. */
@@ -50,10 +81,16 @@ export class RunContext<TContext = unknown> {
         usage?: Usage;
         metadata?: Record<string, unknown>;
         permissionMode?: PermissionMode;
+        depth?: number;
+        skipMemory?: boolean;
+        iterationBudget?: IterationBudget;
     } = {}) {
         this.context = init.context;
         this.usage = init.usage ?? new Usage();
         this.permissionMode = init.permissionMode ?? PermissionMode.DEFAULT;
+        this.depth = init.depth ?? 0;
+        this.skipMemory = init.skipMemory ?? false;
+        this.iterationBudget = init.iterationBudget;
         this._approvals = new Map();
         this._alwaysApprovals = new Map();
         this._metadata = init.metadata ?? {};

@@ -18,6 +18,8 @@
 import type { LLMProvider, LLMMessage } from "../providers/llm.js";
 import type { ToolRegistry, Tool } from "../tools/registry.js";
 import type { AgentState, OnEvent } from "./agent-loop.js";
+import { IterationBudget } from "../iteration-budget.js";
+import { RunContext } from "../run-context.js";
 
 export interface ForkedAgentOptions {
     forkPrompt: string;
@@ -64,6 +66,20 @@ export async function runForkedAgent(options: ForkedAgentOptions): Promise<Agent
 
     const noop: OnEvent = () => {};
 
+    // Forks are isolated like sub-agents: skip parent memory and lessons.
+    // We do NOT bump depth — forks are typically used for memory extraction
+    // and similar background tasks, not user-visible delegation, so they
+    // should not consume the recursive-delegation budget. The `task` tool
+    // remains the only path that increments RunContext.depth.
+    //
+    // Each fork gets its own IterationBudget so a runaway research fork
+    // cannot starve the parent's remaining turns.
+    const _forkTurns = options.maxTurns ?? 5;
+    const forkCtx = new RunContext({
+        skipMemory: true,
+        iterationBudget: new IterationBudget(Math.max(1, Math.floor(_forkTurns))),
+    });
+
     return runAgentGraph(
         options.forkPrompt,
         options.llm,
@@ -80,5 +96,12 @@ export async function runForkedAgent(options: ForkedAgentOptions): Promise<Agent
         false,     // trajectory
         false,     // rethink
         false,     // learn
+        120,       // previewChars
+        500,       // responseChars
+        0,         // timeoutS
+        undefined, // features
+        undefined, // advisorLLM
+        3,         // advisorMaxCalls
+        { runContext: forkCtx },
     );
 }

@@ -17,6 +17,7 @@ import { mkdirSync, appendFileSync, existsSync, readdirSync, statSync, unlinkSyn
 import { atomicWriteFileSync } from "../utils/atomic-write.js";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { redact, redactObj } from "../redact.js";
 
 function getTrajectoriesDir(): string {
     return resolve(process.cwd(), ".clawagents", "trajectories");
@@ -247,23 +248,35 @@ export class TrajectoryRecorder {
         this.cumulativeScore += score;
         this.totalTokens += tokensUsed;
 
+        // Redact secret-shaped substrings before persisting. Trajectories are
+        // often shared with teammates / pasted into bug reports, so this is the
+        // last line of defence against a leaked tool result containing an API
+        // key.
+        for (const tc of calls) {
+            if (tc.args && typeof tc.args === "object") {
+                tc.args = redactObj(tc.args) as Record<string, unknown>;
+            }
+            tc.outputPreview = redact(tc.outputPreview);
+            if (tc.error) tc.error = redact(tc.error);
+        }
+
         const turn: TurnRecord = {
             runId: this.runId,
             turnIndex: this.turns.length,
             timestamp: Date.now(),
-            responseText: responseText.slice(0, this.responseChars),
+            responseText: redact(responseText.slice(0, this.responseChars)),
             model,
             tokensUsed,
             toolCalls: calls,
             score,
             cumulativeScore: this.cumulativeScore,
-            observationContext: (observationContext ?? "").slice(0, 300),
+            observationContext: redact((observationContext ?? "").slice(0, 300)),
             productivityScore: productivity,
             deterministicScore: detScore,
             promptTokenCount: promptTokenCount ?? 0,
             responseTokenCount: responseTokenCount ?? 0,
-            thinking: thinking ? thinking.slice(0, 500) : null,
-            metadata: metadata ?? {},
+            thinking: thinking ? redact(thinking.slice(0, 500)) : null,
+            metadata: metadata ? (redactObj(metadata) as Record<string, unknown>) : {},
         };
 
         this.turns.push(turn);
@@ -323,7 +336,7 @@ export class TrajectoryRecorder {
 
         const summary: RunSummary = {
             runId: this.runId,
-            task: this.task.slice(0, 200),
+            task: redact(this.task.slice(0, 200)),
             model: this.model,
             totalTurns: this.turns.length,
             totalToolCalls: toolTotal,

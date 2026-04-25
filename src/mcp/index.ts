@@ -30,6 +30,7 @@ export {
     MCPLifecyclePhase,
     isMCPSdkAvailable,
     requireMCPSdk,
+    scrubEnvForStdio,
 } from "./server.js";
 export type {
     MCPServerStdioParams,

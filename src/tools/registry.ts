@@ -39,6 +39,17 @@ export interface Tool {
     ): Promise<ToolResult>;
     /** When true, results are cached by (name, args) with a configurable TTL. */
     cacheable?: boolean;
+    /**
+     * When true, the tool may run concurrently with other parallel-safe tools.
+     * Defaults to membership in `DEFAULT_PARALLEL_SAFE_TOOLS`.
+     */
+    parallelSafe?: boolean;
+    /**
+     * Name of the argument that identifies the resource the tool touches.
+     * Used to keep two parallel-safe tools that target the same path serial.
+     * Defaults to `DEFAULT_PATH_SCOPED_ARGS[name]` when not declared.
+     */
+    pathScopedArg?: string;
 }
 
 export interface ParsedToolCall {
@@ -86,6 +97,46 @@ const MAX_TOOL_OUTPUT_CHARS = 12_000;
 const TRUNCATION_HEAD_CHARS = 5_000;
 const TRUNCATION_TAIL_CHARS = 2_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 120_000;
+
+
+// ─── Parallel-execution policy (learned from Hermes) ──────────────────────
+// A tool is run concurrently with siblings only when it is parallel-safe AND
+// its path scope (if any) does not collide with another call's path scope.
+
+export const NEVER_PARALLEL_TOOLS: ReadonlySet<string> = new Set([
+    "ask_user", "clarify", "confirm", "approve_action",
+]);
+
+export const DEFAULT_PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set([
+    "read_file", "list_dir", "glob", "search_files", "grep",
+    "web_fetch", "shell",
+]);
+
+export const DEFAULT_PATH_SCOPED_ARGS: Readonly<Record<string, string>> = {
+    read_file: "path",
+    list_dir: "path",
+    glob: "path",
+    search_files: "path",
+    grep: "path",
+    web_fetch: "url",
+};
+
+export const MAX_PARALLEL_TOOL_WORKERS = 8;
+
+function isParallelSafe(tool: Tool): boolean {
+    if (NEVER_PARALLEL_TOOLS.has(tool.name)) return false;
+    if (tool.parallelSafe === true) return true;
+    if (tool.parallelSafe === false) return false;
+    return DEFAULT_PARALLEL_SAFE_TOOLS.has(tool.name);
+}
+
+function pathScopeOf(tool: Tool, args: Record<string, unknown>): string | null {
+    const argName = tool.pathScopedArg ?? DEFAULT_PATH_SCOPED_ARGS[tool.name];
+    if (!argName) return null;
+    const v = args[argName];
+    if (v === undefined || v === null) return null;
+    return String(v);
+}
 
 export function truncateToolOutput(
     output: string | any[],
@@ -387,14 +438,69 @@ export class ToolRegistry {
         if (calls.length === 0) return [];
         if (calls.length === 1) return [await this.executeTool(calls[0].toolName, calls[0].args, runContext)];
 
-        const settled = await Promise.allSettled(
-            calls.map((call) => this.executeTool(call.toolName, call.args, runContext)),
-        );
+        // Partition calls into ordered batches:
+        //   * never-parallel / unsafe tools form singleton batches
+        //   * parallel-safe tools merge into the trailing batch when their
+        //     path scope (if any) does not collide with existing scopes
+        type Slot = { idx: number; call: ParsedToolCall };
+        const batches: Slot[][] = [];
+        const scopesPerBatch: Set<string>[] = [];
 
-        return settled.map((result) =>
-            result.status === "fulfilled"
-                ? result.value
-                : { success: false, output: "", error: `Tool error: ${String(result.reason)}` },
-        );
+        for (let i = 0; i < calls.length; i++) {
+            const call = calls[i];
+            const tool = this.tools.get(call.toolName);
+            const psafe = !!(tool && isParallelSafe(tool));
+            const scope = tool ? pathScopeOf(tool, call.args) : null;
+
+            if (!psafe) {
+                batches.push([{ idx: i, call }]);
+                scopesPerBatch.push(new Set());
+                continue;
+            }
+
+            if (batches.length > 0) {
+                const last = batches[batches.length - 1];
+                const lastScopes = scopesPerBatch[scopesPerBatch.length - 1];
+                const lastTool = this.tools.get(last[0].call.toolName);
+                const lastPsafe = !!(lastTool && isParallelSafe(lastTool));
+                if (
+                    lastPsafe
+                    && (scope === null || !lastScopes.has(scope))
+                    && last.length < MAX_PARALLEL_TOOL_WORKERS
+                ) {
+                    last.push({ idx: i, call });
+                    if (scope !== null) lastScopes.add(scope);
+                    continue;
+                }
+            }
+
+            batches.push([{ idx: i, call }]);
+            scopesPerBatch.push(scope !== null ? new Set([scope]) : new Set());
+        }
+
+        const results: (ToolResult | undefined)[] = new Array(calls.length).fill(undefined);
+        for (const batch of batches) {
+            if (batch.length === 1) {
+                const { idx, call } = batch[0];
+                try {
+                    results[idx] = await this.executeTool(call.toolName, call.args, runContext);
+                } catch (err) {
+                    results[idx] = { success: false, output: "", error: `Tool error: ${String(err)}` };
+                }
+            } else {
+                const settled = await Promise.allSettled(
+                    batch.map(({ call }) => this.executeTool(call.toolName, call.args, runContext)),
+                );
+                for (let j = 0; j < batch.length; j++) {
+                    const { idx } = batch[j];
+                    const r = settled[j];
+                    results[idx] = r.status === "fulfilled"
+                        ? r.value
+                        : { success: false, output: "", error: `Tool error: ${String(r.reason)}` };
+                }
+            }
+        }
+
+        return results.map((r) => r ?? { success: false, output: "", error: "missing result" });
     }
 }

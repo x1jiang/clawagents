@@ -18,8 +18,14 @@ export type {
 } from "./graph/agent-loop.js";
 
 // ── openai-agents-python parity surfaces ─────────────────────────────
-export { RunContext } from "./run-context.js";
+export { RunContext, MAX_SUBAGENT_DEPTH } from "./run-context.js";
 export type { ApprovalRecord } from "./run-context.js";
+export {
+    IterationBudget,
+    DEFAULT_DELEGATION_MAX_ITERATIONS,
+} from "./iteration-budget.js";
+export { PluginManager } from "./plugins.js";
+export type { Plugin } from "./plugins.js";
 export { Usage, RequestUsage } from "./usage.js";
 export type {
     StreamEvent, TurnStartedEvent, AssistantTextEvent, AssistantDeltaEvent,
@@ -195,3 +201,63 @@ export type {
     MCPToolDescriptor,
     ToolFilter as MCPToolFilter,
 } from "./mcp/index.js";
+
+// ── Slash-command registry (v6.5) ────────────────────────────────────
+export {
+    COMMAND_REGISTRY,
+    registerCommand,
+    resolveCommand,
+    listCommands,
+    formatHelp,
+    allCommandNames,
+} from "./commands.js";
+export type { CommandDef, ResolvedCommand, ListCommandsOpts } from "./commands.js";
+
+// ── Mid-run nudges (v6.5) ────────────────────────────────────────────
+export {
+    SteerQueue, NextTurnQueue, SteerHook,
+    steer, queueMessage,
+    drainSteer, drainNextTurn,
+    peekSteer, peekNextTurn,
+} from "./steer.js";
+export type { SteerMessage } from "./steer.js";
+
+// ── Display-layer redaction (v6.5) ───────────────────────────────────
+export { redact, redactObj, redactEnv, addPattern } from "./redact.js";
+
+// ── Profile-aware filesystem paths (v6.5) ────────────────────────────
+export {
+    DEFAULT_PROFILE,
+    WORKSPACE_DIRNAME,
+    HOME_DIRNAME,
+    getClawagentsHome,
+    getClawagentsWorkspaceDir,
+    getTrajectoriesDir,
+    getSessionsDir,
+    getLessonsDir,
+    displayClawagentsHome,
+    displayClawagentsWorkspaceDir,
+    listProfiles,
+} from "./paths.js";
+export type { Scope as ClawagentsPathScope, PathOpts as ClawagentsPathOpts } from "./paths.js";
+
+// ── Auxiliary model registry (v6.5) ──────────────────────────────────
+export {
+    AuxModelTask,
+    AuxModelRegistry,
+    coerceAuxSpec,
+    withOverrides as withAuxOverrides,
+} from "./aux-models.js";
+export type { AuxModelSpec } from "./aux-models.js";
+
+// ── Transport abstraction (v6.5) ─────────────────────────────────────
+export { Transport, TransportRegistry, LegacyChatTransport } from "./transport.js";
+export type { TransportRequest, TransportResponse } from "./transport.js";
+
+// ── Background jobs (v6.5) ───────────────────────────────────────────
+export { BackgroundJobManager } from "./background.js";
+export type {
+    BackgroundJob,
+    JobNotifier,
+    StartOptions as BackgroundStartOptions,
+} from "./background.js";

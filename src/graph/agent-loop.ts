@@ -37,6 +37,10 @@ import {
     GuardrailTripwireTriggered,
 } from "../guardrails.js";
 import type { Session } from "../session/backends.js";
+import {
+    DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_MS,
+    runWithHeartbeat,
+} from "../session/heartbeat.js";
 import { RetryPolicy } from "../retry.js";
 import { handoffSpan } from "../tracing/context.js";
 
@@ -261,7 +265,7 @@ function resolveContextBudget(modelName: string, contextWindow: number): { windo
 
 // ─── State ─────────────────────────────────────────────────────────────────
 
-export type AgentStatus = "running" | "done" | "error";
+export type AgentStatus = "running" | "done" | "error" | "max_iterations";
 
 export interface AgentState {
     messages: LLMMessage[];
@@ -1270,6 +1274,19 @@ export async function runAgentGraph<TContext = unknown>(
         new RunContext<TContext>({ context: extras?.context })) as RunContext<TContext>;
     if (!runContext.usage) runContext.usage = new Usage();
     const usage = runContext.usage;
+
+    // Per-agent iteration budget (Hermes parity). When the caller has not
+    // already attached one (e.g., through a subagent-spawning path that
+    // creates a fresh budget), build one sized to ``maxIterations`` so the
+    // loop has a single source of truth for "are we out of turns?". The
+    // existing ``for roundIdx < effectiveMaxRounds`` loop still acts as a
+    // belt-and-braces hard ceiling, but the budget is the user-visible
+    // control surface and is what subagents reset.
+    if (runContext.iterationBudget === undefined) {
+        const { IterationBudget: _IterBudget } = await import("../iteration-budget.js");
+        const _budgetSize = Math.max(0, maxIterations > 0 ? maxIterations : MAX_TOOL_ROUNDS);
+        runContext.iterationBudget = new _IterBudget(_budgetSize);
+    }
     const hooks: RunHooks<TContext> | undefined = extras?.hooks;
     const agentHooks: RunHooks<TContext> | undefined = extras?.agentHooks;
     const inputGuardrails = extras?.inputGuardrails ?? [];
@@ -1407,7 +1424,8 @@ export async function runAgentGraph<TContext = unknown>(
     let promptToUse = systemPrompt || BASE_SYSTEM_PROMPT;
 
     // PTRL Layer 1: Pre-run lesson injection
-    if (learn) {
+    // Subagents (skipMemory=true) run isolated from parent memory — Hermes parity.
+    if (learn && !runContext.skipMemory) {
         const { buildLessonPreamble } = await import("../trajectory/lessons.js");
         const preamble = buildLessonPreamble();
         if (preamble) {
@@ -1552,9 +1570,25 @@ export async function runAgentGraph<TContext = unknown>(
                 break;
             }
 
+            // Consume one unit of the iteration budget. When exhausted,
+            // surface the same "max_iterations" outcome as Hermes so
+            // trajectory recorders flag the run as truncated rather than
+            // successful. Round 0 always succeeds because the budget was
+            // sized to ``maxIterations`` above.
+            if (runContext.iterationBudget && !runContext.iterationBudget.consume()) {
+                emit("warn", {
+                    message:
+                        `iteration budget exhausted ` +
+                        `(${runContext.iterationBudget.used}/${runContext.iterationBudget.maxTotal})`,
+                });
+                state.status = "max_iterations";
+                state.result = state.result || "[iteration budget exhausted]";
+                break;
+            }
+
             // Emit typed turn_started marker (openai-agents parity).
             emit("turn_started", { iteration: roundIdx, agent: agentName });
-            await fireHook("onLLMStart", { iteration: roundIdx });
+            await fireHook("onLLMStart", { iteration: roundIdx, messages });
 
             // Session: mark turn start
             if (sessionWriter) sessionWriter.writeTurnStarted(roundIdx);
@@ -2063,10 +2097,26 @@ export async function runAgentGraph<TContext = unknown>(
 
                 await fireHook("onToolStart", { toolName: call.toolName, args: call.args, toolCallId: callId });
                 emit("tool_started", { name: call.toolName, callId, args: call.args });
-                let toolResult = await registry!.executeTool(
-                    call.toolName,
-                    call.args,
-                    runContext as RunContext<unknown>,
+                // ── Activity heartbeats (Hermes parity) ─────────────────
+                // Long-running tools (slow web fetches, deep bash runs)
+                // would otherwise produce zero events between start and
+                // finish; upstream proxies and chat-platform gateways
+                // interpret that as "idle" and kill the connection.
+                // Emit a periodic ``tool_heartbeat`` while the call is in
+                // flight so listeners can keep the channel alive and surface
+                // progress.
+                let toolResult = await runWithHeartbeat(
+                    registry!.executeTool(
+                        call.toolName,
+                        call.args,
+                        runContext as RunContext<unknown>,
+                    ),
+                    {
+                        onEvent: (kind, payload) => emit(kind as EventKind, payload),
+                        kind: "tool_heartbeat",
+                        payload: { tool_name: call.toolName, call_id: callId },
+                        intervalMs: DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_MS,
+                    },
                 );
                 state.toolCalls++;
                 await fireHook("onToolEnd", { toolName: call.toolName, args: call.args, result: toolResult, toolCallId: callId });
@@ -2299,9 +2349,27 @@ export async function runAgentGraph<TContext = unknown>(
                     emit("tool_started", { name: call.toolName, callId, args: call.args });
                 }
 
-                const results = await registry!.executeToolsParallel(
-                    approvedCalls,
-                    runContext as RunContext<unknown>,
+                // Heartbeat across the parallel batch; ``call_ids`` lets
+                // listeners disambiguate which group is currently in flight.
+                const _approvedCallIds = approvedCalls.map((c, idx) => {
+                    const ntc = nativeToolCallObjects[idx];
+                    return ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${c.toolName}`;
+                });
+                const results = await runWithHeartbeat(
+                    registry!.executeToolsParallel(
+                        approvedCalls,
+                        runContext as RunContext<unknown>,
+                    ),
+                    {
+                        onEvent: (kind, payload) => emit(kind as EventKind, payload),
+                        kind: "tool_heartbeat",
+                        payload: {
+                            parallel: true,
+                            tool_names: approvedCalls.map((c) => c.toolName),
+                            call_ids: _approvedCallIds,
+                        },
+                        intervalMs: DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_MS,
+                    },
                 );
                 state.toolCalls += approvedCalls.length;
 
@@ -2517,7 +2585,8 @@ export async function runAgentGraph<TContext = unknown>(
     }
 
     // ── PTRL Layer 3: Post-run self-analysis (with quality gate) ──
-    if (learn && recorder && runSummary) {
+    // Skipped for subagents (skipMemory=true) so they don't pollute parent lessons.
+    if (learn && recorder && runSummary && !runContext.skipMemory) {
         try {
             const { extractLessons, saveLessons, shouldExtractLessons } = await import("../trajectory/lessons.js");
 

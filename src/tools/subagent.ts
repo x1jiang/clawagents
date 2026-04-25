@@ -12,6 +12,8 @@ import type { Tool, ToolResult, ToolRegistry } from "./registry.js";
 import { enqueueCommandInLane } from "../process/command-queue.js";
 import { CommandLane } from "../process/lanes.js";
 import { isEnabled } from "../config/features.js";
+import { IterationBudget } from "../iteration-budget.js";
+import { MAX_SUBAGENT_DEPTH, RunContext } from "../run-context.js";
 import * as os from "node:os";
 
 /** Keys that must NOT be inherited by child agents — prevents parent context leakage. */
@@ -42,19 +44,30 @@ export interface SubAgentSpec {
     credentialProxy?: boolean;
 }
 
+/**
+ * Test-only seam: lets unit tests inject a stub for the dynamically imported
+ * `runAgentGraph`. ESM module-namespace exports are read-only at runtime, so
+ * we cannot monkey-patch `agent-loop.js` from a test file. Production code
+ * leaves this `undefined` and the real `runAgentGraph` is dynamically imported.
+ */
+export type RunAgentGraphFn = typeof import("../graph/agent-loop.js")["runAgentGraph"];
+
 export class TaskTool implements Tool {
     name = "task";
     description: string;
     parameters: Record<string, { type: string; description: string; required?: boolean }>;
     private useQueue: boolean;
+    private runAgentGraphImpl?: RunAgentGraphFn;
 
     constructor(
         private llm: LLMProvider,
         private tools: ToolRegistry,
         private subagents: SubAgentSpec[] = [],
         useQueue = false,
+        runAgentGraphImpl?: RunAgentGraphFn,
     ) {
         this.useQueue = useQueue;
+        this.runAgentGraphImpl = runAgentGraphImpl;
         const agentNames = subagents.map((s) => s.name);
         const agentList = agentNames.length > 0
             ? ` Available specialized agents: ${agentNames.join(", ")}.`
@@ -81,9 +94,31 @@ export class TaskTool implements Tool {
         };
     }
 
-    async execute(args: Record<string, unknown>): Promise<ToolResult> {
-        // Dynamic import to avoid circular dependency
-        const { runAgentGraph } = await import("../graph/agent-loop.js");
+    async execute(
+        args: Record<string, unknown>,
+        runContext?: RunContext<unknown>,
+    ): Promise<ToolResult> {
+        // ── Hermes-parity depth cap ────────────────────────────────────
+        // Subagents may delegate, but recursion is bounded at
+        // MAX_SUBAGENT_DEPTH (=2) to keep token / time blow-up bounded.
+        const parentDepth = runContext?.depth ?? 0;
+        if (parentDepth >= MAX_SUBAGENT_DEPTH) {
+            return {
+                success: false,
+                output: "",
+                error:
+                    `Sub-agent delegation refused: depth cap of ${MAX_SUBAGENT_DEPTH} ` +
+                    `reached (parent depth=${parentDepth}). Recursive delegation is ` +
+                    `disallowed; the parent should perform the work directly or split ` +
+                    `it into siblings rather than nesting another \`task\` call.`,
+            };
+        }
+
+        // Dynamic import to avoid circular dependency. Tests may inject
+        // a stub via the constructor's `runAgentGraphImpl` parameter.
+        const runAgentGraph: RunAgentGraphFn =
+            this.runAgentGraphImpl ??
+            (await import("../graph/agent-loop.js")).runAgentGraph;
 
         const description = String(args["description"] ?? "");
         const agentName = args["agent"] ? String(args["agent"]) : undefined;
@@ -132,6 +167,21 @@ export class TaskTool implements Tool {
                 }
             }
 
+            // Build an isolated child RunContext: increment depth, disable
+            // parent memory access (Hermes parity), and give the child a
+            // *fresh* IterationBudget sized to its own ``effectiveMaxIter``
+            // so a runaway subagent cannot starve the parent's remaining
+            // turns. This mirrors Hermes' ``delegation.max_iterations``
+            // contract: each delegated agent has its own budget.
+            const childCtx = new RunContext<unknown>({
+                permissionMode: runContext?.permissionMode,
+                depth: parentDepth + 1,
+                skipMemory: true,
+                iterationBudget: new IterationBudget(
+                    Math.max(1, Math.floor(effectiveMaxIter)),
+                ),
+            });
+
             try {
                 const state = await runAgentGraph(
                     description,
@@ -146,6 +196,16 @@ export class TaskTool implements Tool {
                     undefined,
                     undefined,
                     effectiveNativeTools,
+                    false, // trajectory
+                    false, // rethink
+                    false, // learn
+                    120,   // previewChars
+                    500,   // responseChars
+                    0,     // timeoutS
+                    undefined, // features
+                    undefined, // advisorLLM
+                    3,         // advisorMaxCalls
+                    { runContext: childCtx },
                 );
 
                 if (state.status === "error") {

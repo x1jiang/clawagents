@@ -20,7 +20,7 @@
  */
 
 import type { RunContext } from "./run-context.js";
-import type { LLMResponse } from "./providers/llm.js";
+import type { LLMMessage, LLMResponse } from "./providers/llm.js";
 import type { ToolResult } from "./tools/registry.js";
 import type { AgentState } from "./graph/agent-loop.js";
 
@@ -54,6 +54,17 @@ export interface AgentEndPayload<TContext = unknown>
 export interface LLMStartPayload<TContext = unknown>
     extends LifecyclePayload<TContext> {
     iteration: number;
+    /**
+     * Live messages array that will be sent to the LLM. Hooks may mutate
+     * this in place (append, splice) to inject mid-run nudges; see
+     * {@link SteerHook} in `clawagents/steer.ts`. The agent loop does
+     * not copy this array before invoking the provider, so in-place
+     * edits are observed by the imminent LLM call.
+     *
+     * Optional for backwards compatibility — older code that fired the
+     * hook without messages still typechecks.
+     */
+    messages?: LLMMessage[];
 }
 
 export interface LLMEndPayload<TContext = unknown>

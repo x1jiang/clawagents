@@ -15,6 +15,99 @@
  */
 
 import { customSpan, toolSpan } from "../tracing/index.js";
+import { isSecretName } from "../redact.js";
+import { diagnosticLogger } from "../logging/diagnostic.js";
+
+// ─── Environment scrubbing for stdio MCP servers ──────────────────────────
+
+/**
+ * Variables that are almost always required for a child process to work
+ * (locales, terminal type, shell, home, PATH) but are not secrets. Anything
+ * not on this list is dropped from the inherited parent environment by
+ * default to avoid leaking, e.g., ``OPENAI_API_KEY`` to an untrusted MCP
+ * server.
+ */
+const SAFE_PASSTHROUGH_KEYS = new Set([
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "TZ",
+    "TMPDIR",
+    "PWD",
+]);
+
+function isSafePassthrough(name: string): boolean {
+    if (SAFE_PASSTHROUGH_KEYS.has(name)) return true;
+    if (name.startsWith("LC_")) return true;
+    return false;
+}
+
+/**
+ * Build a minimal, secret-free environment for an MCP stdio child.
+ *
+ * Policy:
+ *  - Start with an empty object.
+ *  - If ``inheritSafe`` (default), copy the parent's locale / shell / path
+ *    keys.
+ *  - Copy any explicit ``allowlist`` keys verbatim.
+ *  - Apply ``userEnv`` last (overriding anything above).
+ *
+ * Anything *not* in the safe passthrough or allowlist is **dropped** —
+ * including ``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, ``AWS_*``, etc.
+ *
+ * Operators that want the legacy "inherit everything when env is undefined"
+ * behaviour can set ``CLAW_MCP_INHERIT_ALL_ENV=1``.
+ */
+export function scrubEnvForStdio(
+    userEnv: Record<string, string> | undefined,
+    opts: {
+        inheritSafe?: boolean;
+        allowlist?: readonly string[];
+        parentEnv?: Record<string, string | undefined>;
+    } = {},
+): Record<string, string> {
+    const inheritSafe = opts.inheritSafe ?? true;
+    const src = opts.parentEnv ?? (process.env as Record<string, string | undefined>);
+    const out: Record<string, string> = {};
+
+    if (inheritSafe) {
+        for (const [k, v] of Object.entries(src)) {
+            if (v !== undefined && isSafePassthrough(k)) out[k] = v;
+        }
+    }
+
+    if (opts.allowlist) {
+        for (const k of opts.allowlist) {
+            const v = src[k];
+            if (v !== undefined) out[k] = v;
+        }
+    }
+
+    if (userEnv) {
+        for (const [k, v] of Object.entries(userEnv)) {
+            if (typeof v === "string") out[k] = v;
+        }
+    }
+
+    const dropped: string[] = [];
+    for (const k of Object.keys(src)) {
+        if (isSecretName(k) && !(k in out)) dropped.push(k);
+    }
+    if (dropped.length > 0) {
+        const preview = dropped.slice(0, 8).sort().join(", ");
+        diagnosticLogger.debug(
+            `clawagents.mcp: dropped ${dropped.length} secret-named env vars from stdio child ` +
+                `(use envAllowlist to inherit explicitly): ${preview}` +
+                (dropped.length > 8 ? " …" : ""),
+        );
+    }
+
+    return out;
+}
 
 // ─── Lifecycle phase ──────────────────────────────────────────────────────
 
@@ -34,7 +127,22 @@ export enum MCPLifecyclePhase {
 export interface MCPServerStdioParams {
     command: string;
     args?: string[];
+    /**
+     * Explicit env vars for the child. Merged on top of the safe-passthrough
+     * set (PATH, HOME, USER, LANG, etc.) — never the full parent env.
+     */
     env?: Record<string, string>;
+    /**
+     * Names of additional env vars to forward verbatim from the parent
+     * process (e.g. ``["GITHUB_TOKEN"]``). Use this for variables the MCP
+     * server genuinely needs.
+     */
+    envAllowlist?: readonly string[];
+    /**
+     * If false, do not inherit any parent env (not even PATH/LANG) — the
+     * child gets only the keys you list explicitly. Defaults to true.
+     */
+    inheritSafeEnv?: boolean;
     cwd?: string;
     /**
      * How to handle stderr of the child process. Forwarded to the SDK transport;
@@ -300,10 +408,23 @@ export class MCPServerStdio extends MCPServer {
         const { StdioClientTransport } = await import(
             "@modelcontextprotocol/sdk/client/stdio.js"
         );
+
+        const inheritAll =
+            (process.env["CLAW_MCP_INHERIT_ALL_ENV"] ?? "").toLowerCase() === "1" ||
+            (process.env["CLAW_MCP_INHERIT_ALL_ENV"] ?? "").toLowerCase() === "true" ||
+            (process.env["CLAW_MCP_INHERIT_ALL_ENV"] ?? "").toLowerCase() === "yes";
+
+        const scrubbedEnv = inheritAll
+            ? this.params.env
+            : scrubEnvForStdio(this.params.env, {
+                  inheritSafe: this.params.inheritSafeEnv ?? true,
+                  allowlist: this.params.envAllowlist,
+              });
+
         return new StdioClientTransport({
             command: this.params.command,
             args: this.params.args ?? [],
-            env: this.params.env,
+            env: scrubbedEnv,
             cwd: this.params.cwd,
             stderr: this.params.stderr,
         });
