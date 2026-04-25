@@ -1,6 +1,11 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.2.2**
+A lean, full-stack agentic protocol. ~2,500 LOC TypeScript. **v6.3.0**
+
+> **v6.3.0 (April 2026)** — Sandbox & SSRF hardening: symlink-resolving
+> `safePath` (closes a sandbox-escape bug), full IPv6 `fe80::/10` link-local
+> coverage in `web_fetch`, denylist parity with the Python sibling. 121 tests
+> pass, `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ## Installation
 
@@ -932,5 +937,22 @@ await router.startAll({
 ## Testing
 
 ```bash
+npm install
+
+# Run the full test suite (expected: 121 passed on v6.3.0)
+npm test
+
+# Type-check without emitting (expected: clean, exit 0 on v6.3.0)
+npm run typecheck
+
+# Build dist/ (runs typecheck under the hood)
+npm run build
+
+# Run a single file
 npx tsx --test src/tools/registry.test.ts
 ```
+
+The `web.test.ts` and `simulated.test.ts` suites cover every bug fixed in
+v6.3.0: symlink-escape blocking via the real `LocalBackend.safePath`, full
+`fe80::/10` IPv6 link-local matching, and the exec denylist (`> /dev/null`,
+`rm /`, `wget http`, `curl http`).
