@@ -56,18 +56,26 @@ export { InMemorySession, JsonlFileSession, SqliteSession } from "./session/back
 export type { Session } from "./session/backends.js";
 export type { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
 export type { ToolCatalogEntry } from "./tools/registry.js";
-export { ResultCacheManager } from "./tools/cache.js";
+export { ResultCacheManager, SqliteResultCacheManager } from "./tools/cache.js";
 export { validateToolArgs, formatValidationErrors } from "./tools/validate.js";
 export type { ValidationResult, ValidationError } from "./tools/validate.js";
+export { createToolDiscoveryTools, namesForToolProfile } from "./tools/catalog.js";
+export type { ToolProfileName } from "./tools/catalog.js";
 export { createComposeTool } from "./tools/compose.js";
 export type { ComposeToolConfig, CallTool, PipelineStep, StepBuilder } from "./tools/compose.js";
 export { createToolProgramTool } from "./tools/tool-program.js";
 export type { ToolProgramOptions } from "./tools/tool-program.js";
-export { runTextEnvironment } from "./eval.js";
+export { runTextEnvironment, runAgentEnvironment } from "./eval.js";
 export type {
     TextEnvironment, TextEnvInit, TextEnvStepOutput,
     TextEvaluationResult, TextEvaluationStep, TextResponder,
+    AgentEnvironment, AgentEnvInit, AgentEnvStepOutput,
+    AgentEvaluationResult, AgentEvaluationStep, AgentResponder,
 } from "./eval.js";
+export { RunResult } from "./run-result.js";
+export type { RunResultState } from "./run-result.js";
+export { createExplorerTools } from "./explorer.js";
+export type { ExplorerToolsOptions } from "./explorer.js";
 export type { LLMProvider, LLMMessage, LLMResponse } from "./providers/llm.js";
 export { TrajectoryRecorder, classifyFailure, pruneTrajectories } from "./trajectory/recorder.js";
 export type { TurnRecord, RunSummary, ToolCallRecord } from "./trajectory/recorder.js";
@@ -125,6 +133,8 @@ export type { SessionInfo, SessionEvent } from "./session/persistence.js";
 
 // SSRF helpers (exposed so consumers / tests can verify guardrails)
 export { ssrfDeps } from "./tools/web.js";
+export { DockerBackend } from "./sandbox/docker.js";
+export type { DockerBackendOptions } from "./sandbox/docker.js";
 export { normalizeSandboxManifest } from "./sandbox/manifest.js";
 export type {
     SandboxManifest,
@@ -417,6 +427,7 @@ export {
     exportAtroposRolloutsJsonl,
     TrlAdapter,
     AtroposAdapter,
+    toNextStateTransitions,
     TRL_AVAILABLE,
     ATROPOS_AVAILABLE,
     FETCH_AVAILABLE as RL_FETCH_AVAILABLE,
@@ -432,6 +443,7 @@ export type {
     RegexScorerOptions,
     LengthPenaltyScorerOptions,
     CompositeScorerOptions,
+    NextStateTransition,
     AtroposSink,
     AtroposSubmitOptions,
 } from "./rl/index.js";

@@ -23,6 +23,8 @@ export interface ToolResult {
 export interface Tool {
     name: string;
     description: string;
+    /** Optional search aliases used by compact tool discovery. */
+    keywords?: string[];
     parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>;
     /**
      * Execute the tool with the given arguments.
@@ -61,6 +63,7 @@ export interface ToolCatalogEntry {
     name: string;
     description: string;
     parameters: Tool["parameters"];
+    keywords: string[];
     cacheable: boolean;
     parallelSafe: boolean;
     pathScopedArg: string | null;
@@ -84,6 +87,7 @@ export class LazyFactoryTool implements Tool {
         public readonly description: string,
         public readonly parameters: Record<string, { type: string; description: string; required?: boolean; items?: { type: string } }>,
         factory: () => Promise<Tool>,
+        public readonly keywords?: string[],
     ) {
         this._factory = factory;
     }
@@ -245,9 +249,10 @@ export class ToolRegistry {
         cacheMaxSize?: number;
         cacheTtlMs?: number;
         validateArgs?: boolean;
+        resultCache?: ResultCacheManager;
     }) {
         this._toolTimeoutMs = toolTimeoutMs;
-        this._resultCache = new ResultCacheManager(
+        this._resultCache = opts?.resultCache ?? new ResultCacheManager(
             opts?.cacheMaxSize ?? 256,
             opts?.cacheTtlMs ?? 60_000,
         );
@@ -292,6 +297,7 @@ export class ToolRegistry {
             name: tool.name,
             description: tool.description,
             parameters: tool.parameters,
+            keywords: tool.keywords ?? [],
             cacheable: tool.cacheable === true,
             parallelSafe: isParallelSafe(tool),
             pathScopedArg: tool.pathScopedArg ?? DEFAULT_PATH_SCOPED_ARGS[tool.name] ?? null,

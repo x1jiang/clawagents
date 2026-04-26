@@ -85,6 +85,19 @@ export interface TrajectoryStep {
     metadata: Record<string, unknown>;
 }
 
+export interface NextStateTransition {
+    run_id: string;
+    task: string;
+    model: string;
+    step_index: number;
+    state: Record<string, unknown>;
+    action: Record<string, unknown>;
+    next_state: Record<string, unknown>;
+    reward: number | null;
+    done: boolean;
+    metadata: Record<string, unknown>;
+}
+
 export function trajectoryStep(
     init: Partial<TrajectoryStep> & { role: TrajectoryRole }
 ): TrajectoryStep {
@@ -131,6 +144,10 @@ export function stepFromJson(d: Record<string, unknown>): TrajectoryStep {
         name: typeof d.name === "string" ? d.name : undefined,
         metadata: (d.metadata as Record<string, unknown>) ?? {},
     };
+}
+
+function isFeedbackStep(step: TrajectoryStep): boolean {
+    return step.role === "user" || step.metadata.feedback === true || step.metadata.next_state === true;
 }
 
 function makeRunId(): string {
@@ -291,4 +308,31 @@ export class Trajectory {
     static fromJsonString(s: string): Trajectory {
         return Trajectory.fromJson(JSON.parse(s) as Record<string, unknown>);
     }
+}
+
+export function toNextStateTransitions(traj: Trajectory): NextStateTransition[] {
+    const out: NextStateTransition[] = [];
+    for (let i = 0; i < traj.steps.length; i++) {
+        const action = traj.steps[i];
+        if (action.role !== "assistant") continue;
+        const nextIndex = traj.steps.findIndex((step, idx) => idx > i && isFeedbackStep(step));
+        if (nextIndex < 0) continue;
+        const prev = traj.steps
+            .slice(0, i)
+            .reverse()
+            .find((step) => step.role === "user" || step.role === "system");
+        out.push({
+            run_id: traj.runId,
+            task: traj.task,
+            model: traj.model,
+            step_index: i,
+            state: stepToJson(prev ?? trajectoryStep({ role: "user", content: traj.task })),
+            action: stepToJson(action),
+            next_state: stepToJson(traj.steps[nextIndex]),
+            reward: traj.reward,
+            done: nextIndex === traj.steps.length - 1,
+            metadata: { ...traj.metadata, ...action.metadata },
+        });
+    }
+    return out;
 }

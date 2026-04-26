@@ -1,16 +1,17 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.3**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.4**
 
-> **v6.6.3 (April 2026)** — Performance and release hardening for the
-> Hermes-parity line. Persisted sessions now preload a bounded history by
-> default, large in-process diffs return bounded summaries instead of building
-> huge LCS tables, and single-file grep stops at the same match cap as
-> directory grep. The Python sibling also offloads local async filesystem I/O
-> and appends trajectory run summaries. **497 TypeScript tests** pass
-> (**49 parity checks**), `tsc --noEmit` clean; **778 Python tests** pass.
-> Real `.env` smoke tests passed against Gemini and OpenAI, including
-> read-only tool use and subagent delegation. See [Changelog](#changelog).
+> **v6.6.4 (April 2026)** — ToolUniverse-style discovery and infrastructure
+> parity release. Tool discovery now searches tool names, descriptions, and
+> explicit keyword aliases, so compact tool selection is less brittle when a
+> model uses a related term instead of the exact tool name. This release also
+> adds bounded tool profiles, Docker sandbox support, resumable `RunResult`
+> metadata, SQLite result caching for safe cacheable tools, explorer helpers,
+> gym-style eval aliases, and next-state trajectory exports across the
+> TypeScript and Python packages. **509 TypeScript tests** pass
+> (**49 parity checks**), `tsc --noEmit` clean; **786 Python tests** pass.
+> See [Changelog](#changelog).
 
 ## Installation
 
@@ -856,6 +857,27 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.6.4 — Keyword discovery and infrastructure parity (April 2026)
+
+Patch release for the v6.6 line. Test totals after this release:
+**TypeScript 509 passed, 4 skipped** plus **49 parity checks**;
+**Python 786 passed, 3 skipped**; `tsc --noEmit` clean.
+
+- **Keyword-backed compact discovery** — tools can now declare explicit
+  keyword aliases, `tool_discover` searches names, descriptions, and those
+  aliases, and `tool_describe`/registry inspection expose the metadata so
+  compact tool universes stay useful even when the model uses a near-synonym.
+- **Bounded tool profiles** — catalog helpers can publish smaller tool views
+  for focused agents while preserving the full registry for callers that need
+  it.
+- **Infrastructure parity** — Docker sandbox support, resumable `RunResult`
+  metadata, SQLite result caching for safe cacheable tools, explorer helpers,
+  gym-style eval aliases, and next-state trajectory export helpers now ship in
+  both the TypeScript and Python packages.
+- **Cache safety defaults** — read/search-style filesystem outputs remain
+  uncached by default to avoid persisting sensitive repository contents, while
+  explicitly cacheable pure tools can reuse results across runs.
+
 ### v6.6.3 — Efficiency and release hardening (April 2026)
 
 Patch release for the v6.6 line. Test totals after this release:
@@ -1403,14 +1425,14 @@ await router.startAll({
 ```bash
 npm install
 
-# Run the full test suite (passes on v6.6.3)
+# Run the full test suite (passes on v6.6.4)
 npm test
 
 # Hermetic runner — exactly the environment CI uses (pinned
 # --test-concurrency=4, TZ=UTC, NODE_ENV=test, credentials scrubbed)
 npm run test:hermetic
 
-# Type-check without emitting (clean, exit 0 on v6.6.3)
+# Type-check without emitting (clean, exit 0 on v6.6.4)
 npm run typecheck
 
 # Build dist/ (runs typecheck under the hood)

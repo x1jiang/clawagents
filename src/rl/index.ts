@@ -25,12 +25,14 @@
 export { MissingRLDependencyError, RLError } from "./errors.js";
 
 export type {
+    NextStateTransition,
     ToolCall,
     TrajectoryRole,
     TrajectoryStep,
 } from "./trajectory.js";
 export {
     Trajectory,
+    toNextStateTransitions,
     stepFromJson,
     stepToJson,
     toolCall,

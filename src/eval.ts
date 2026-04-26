@@ -22,6 +22,11 @@ export interface TextEnvironment {
 
 export type TextResponder = (messages: LLMMessage[]) => string | Promise<string>;
 
+export type AgentEnvInit = TextEnvInit;
+export type AgentEnvStepOutput = TextEnvStepOutput;
+export type AgentEnvironment = TextEnvironment;
+export type AgentResponder = TextResponder;
+
 export interface TextEvaluationStep {
     action: string;
     observations: LLMMessage[];
@@ -36,6 +41,9 @@ export interface TextEvaluationResult {
     metrics: Record<string, unknown>;
     metadata: Record<string, unknown>;
 }
+
+export type AgentEvaluationStep = TextEvaluationStep;
+export type AgentEvaluationResult = TextEvaluationResult;
 
 export async function runTextEnvironment(
     responder: TextResponder,
@@ -73,4 +81,12 @@ export async function runTextEnvironment(
         metrics: env.getMetrics?.() ?? {},
         metadata: { ...(initial.metadata ?? {}) },
     };
+}
+
+export async function runAgentEnvironment(
+    responder: AgentResponder,
+    env: AgentEnvironment,
+    opts: { maxTurns?: number } = {},
+): Promise<AgentEvaluationResult> {
+    return await runTextEnvironment(responder, env, opts);
 }

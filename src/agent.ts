@@ -519,7 +519,7 @@ export async function createClawAgent({
         registry.register(new LazyFactoryTool(spec.name, spec.description, spec.parameters, async () => {
             const tools = createFilesystemTools(sb);
             return tools.find((t) => t.name === spec.name)!;
-        }));
+        }, spec.keywords));
     }
 
     const { createExecTools } = await import("./tools/exec.js");
@@ -527,7 +527,7 @@ export async function createClawAgent({
         registry.register(new LazyFactoryTool(spec.name, spec.description, spec.parameters, async () => {
             const tools = createExecTools(sb);
             return tools.find((t) => t.name === spec.name)!;
-        }));
+        }, spec.keywords));
     }
 
     const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
@@ -535,7 +535,7 @@ export async function createClawAgent({
         registry.register(new LazyFactoryTool(spec.name, spec.description, spec.parameters, async () => {
             const tools = createAdvancedFsTools(sb);
             return tools.find((t) => t.name === spec.name)!;
-        }));
+        }, spec.keywords));
     }
 
     const { webTools } = await import("./tools/web.js");
@@ -543,7 +543,7 @@ export async function createClawAgent({
     registry.register(new LazyFactoryTool(webFetchSpec.name, webFetchSpec.description, webFetchSpec.parameters, async () => {
         const { webTools: resolvedWebTools } = await import("./tools/web.js");
         return resolvedWebTools.find((t) => t.name === "web_fetch")!;
-    }));
+    }, webFetchSpec.keywords));
 
     // ── Adapt and register user-provided tools ───────────────────────
     if (tools) {

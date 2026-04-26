@@ -49,6 +49,7 @@ export interface FunctionToolParamSpec {
 export interface FunctionToolOptions<A extends Record<string, unknown>, TContext = unknown> {
     name: string;
     description: string;
+    keywords?: string[];
     parameters?: Record<string, FunctionToolParamSpec>;
     /**
      * When `true`, the wrapped function receives `runContext` as its
@@ -114,6 +115,7 @@ export function functionTool<
     const tool: Tool = {
         name: options.name,
         description: options.description,
+        keywords: options.keywords,
         parameters,
         cacheable: options.cacheable,
         async execute(
@@ -196,6 +198,7 @@ export interface CreateToolOptions<TContext = unknown> {
     description: string;
     /** Zod object schema OR a plain parameters map. */
     schema?: ZodLike | Record<string, FunctionToolParamSpec>;
+    keywords?: string[];
     usesRunContext?: boolean;
     execute: (
         args: Record<string, unknown>,
@@ -239,6 +242,7 @@ export function createTool<TContext = unknown>(
     return functionTool({
         name: options.name,
         description: options.description,
+        keywords: options.keywords,
         parameters,
         usesRunContext: options.usesRunContext,
         execute: options.execute as FunctionToolOptions<

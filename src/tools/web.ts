@@ -111,6 +111,7 @@ function stripHtml(html: string): string {
 export const webFetchTool: Tool = {
     name: "web_fetch",
     cacheable: true,
+    keywords: ["fetch url", "http request", "read webpage", "download text", "documentation"],
     description:
         "Fetch content from a URL. Returns the text content of the page. " +
         "Useful for reading documentation, API responses, or checking web resources. " +

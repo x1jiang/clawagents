@@ -34,6 +34,7 @@ function matchesGlob(name: string, pattern: string): boolean {
 function createLsTool(sb: SandboxBackend): Tool {
     return {
         name: "ls",
+        keywords: ["list files", "directory listing", "folder contents", "file metadata"],
         description: "List files and directories with metadata (size, modified time).",
         parameters: {
             path: { type: "string", description: "Path to list. Default: current directory", required: true },
@@ -75,6 +76,7 @@ function createReadFileTool(sb: SandboxBackend): Tool {
     return {
         name: "read_file",
         cacheable: true,
+        keywords: ["open file", "view file", "show file", "file contents", "cat"],
         description: "Read file contents with line numbers. Supports offset/limit for pagination.",
         parameters: {
             path: { type: "string", description: "Path to the file to read", required: true },
@@ -123,6 +125,7 @@ function createReadFileTool(sb: SandboxBackend): Tool {
 function createWriteFileTool(sb: SandboxBackend): Tool {
     return {
         name: "write_file",
+        keywords: ["create file", "save file", "overwrite file", "write content"],
         description: "Write content to a file. Creates parent directories if needed.",
         parameters: {
             path: { type: "string", description: "Path to write the file", required: true },
@@ -148,6 +151,7 @@ function createWriteFileTool(sb: SandboxBackend): Tool {
 function createEditFileTool(sb: SandboxBackend): Tool {
     return {
         name: "edit_file",
+        keywords: ["replace text", "modify file", "patch file", "change file", "update file"],
         description: "Edit a file by replacing a specific block of text. The target must exactly match existing content.",
         parameters: {
             path: { type: "string", description: "Path to the file to edit", required: true },
@@ -218,6 +222,7 @@ function createGrepTool(sb: SandboxBackend): Tool {
     return {
         name: "grep",
         cacheable: true,
+        keywords: ["search", "find text", "match text", "file contents", "ripgrep", "rg"],
         description: "Search for a text pattern in files. Supports recursive multi-file search with glob filtering.",
         parameters: {
             path: { type: "string", description: "File or directory to search", required: true },
@@ -308,6 +313,7 @@ function createGrepTool(sb: SandboxBackend): Tool {
 function createGlobTool(sb: SandboxBackend): Tool {
     return {
         name: "glob",
+        keywords: ["find files", "file pattern", "filename search", "wildcard"],
         description: "Find files matching a glob pattern. Use '**/*.ts' for recursive search.",
         parameters: {
             pattern: { type: "string", description: "Glob pattern (e.g., '**/*.ts', 'src/**/*.js')", required: true },

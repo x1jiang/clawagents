@@ -47,6 +47,7 @@ export function isDangerousCommand(command: string): boolean {
 function createExecTool(sb: SandboxBackend): Tool {
     return {
         name: "execute",
+        keywords: ["shell", "bash", "command", "run script", "terminal"],
         description:
             "Execute a shell command and return its output. Use for running scripts, installing packages, checking system state, etc. Commands run in the current working directory.",
         parameters: {

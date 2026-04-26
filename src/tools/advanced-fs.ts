@@ -22,6 +22,7 @@ const MAX_LARGE_DIFF_LINES = 200;
 function createTreeTool(sb: SandboxBackend): Tool {
     return {
         name: "tree",
+        keywords: ["directory tree", "project overview", "folder structure", "list files"],
         description:
             "Show a recursive directory tree. Much faster than ls for getting a project overview. " +
             "Automatically skips node_modules, .git, __pycache__, etc.",
@@ -95,6 +96,7 @@ function createTreeTool(sb: SandboxBackend): Tool {
 function createDiffTool(sb: SandboxBackend): Tool {
     return {
         name: "diff",
+        keywords: ["compare files", "file changes", "unified diff", "patch preview"],
         description:
             "Compare two files and show their differences in unified diff format. " +
             "Useful for reviewing changes before or after edits.",
@@ -261,6 +263,7 @@ function computeLCS(a: string[], b: string[]): string[] {
 function createInsertLinesTool(sb: SandboxBackend): Tool {
     return {
         name: "insert_lines",
+        keywords: ["insert text", "add lines", "append code", "modify file"],
         description:
             "Insert text at a specific line number in a file. Line 0 inserts at the top; " +
             "a line beyond the file length appends at the end. More precise than edit_file for adding new code.",
