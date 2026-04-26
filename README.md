@@ -245,7 +245,7 @@ console.log(result.bestResult);  // best answer
 console.log(result.bestScore);   // objective score
 ```
 
-### Browser tools (v6.6)
+### Browser tools
 
 Give the agent a Playwright-backed browser. Install once: `npm install playwright && npx playwright install chromium`.
 
@@ -261,7 +261,7 @@ const result = await agent.invoke("Open https://example.com and summarise the pa
 
 `createBrowserTools()` lazily instantiates a sandboxed `BrowserSession` on first use, applies SSRF + scheme checks before every navigation, and registers a shutdown hook so the headless Chromium is torn down when the agent exits. Cloud providers (Browserbase, browser-use) plug in through the `BrowserSession` constructor — see `getProvider()`.
 
-### Scheduled jobs / cron (v6.6)
+### Scheduled jobs / cron
 
 Run agent prompts on a schedule. Interval (`every 5m`) and one-shot (`@once`) schedules work out of the box; cron expressions (`0 9 * * *`) require `npm install cron-parser`.
 
@@ -284,7 +284,7 @@ await scheduler.stop();
 
 `listJobs()`, `pauseJob()`, `triggerJob()`, and `removeJob()` round out the management API. Each successful run records its output under `~/.clawagents/<profile>/cron/runs/<jobId>/<timestamp>.json` so you can audit history.
 
-### ACP adapter (v6.6)
+### ACP adapter
 
 Serve a ClawAgents agent over Zed's [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol) (JSON-RPC over stdio). Install: `npm install @zed-industries/agent-client-protocol`.
 
@@ -297,7 +297,7 @@ await new AcpServer({ agent }).serve();  // blocks on stdin/stdout until EOF
 
 Streaming chunks (`agent_message_chunk`, `agent_thought_chunk`), tool-call updates, and permission prompts are all bridged to ACP `SessionUpdate` events. Pass `permissionRequester` to wire HITL approval into the host UI.
 
-### RL fine-tuning hooks (v6.6)
+### RL fine-tuning hooks
 
 Capture agent runs as training-ready trajectories and export them to TRL / SLIME / Atropos / generic JSONL. The recorder is dependency-free; framework adapters bring their own peer deps when you actually drive a trainer.
 
@@ -755,19 +755,15 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.6 (TypeScript)** against three peer agent frameworks:
+> Compares **ClawAgents v6.7.1 (TypeScript)** against three peer agent frameworks:
 > **Hermes Agent** ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)),
 > **DeepAgents** ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)),
 > and **OpenClaw**.
-> The 10 hardening patterns introduced in v6.5 (subagent depth limits, memory-isolated forks,
-> activity heartbeats, per-agent IterationBudget, path-scoped parallel tool execution, plugin
-> hook expansion, runtime `displayClawagentsHome()`, prompt-cache-aware `CommandDef`,
-> documented prompt-cache policy, and the hermetic `npm run test:hermetic` runner) and the
-> four Hermes-parity feature areas added in v6.6 (browser tools, cron / scheduler, ACP
-> adapter, RL fine-tuning hooks) closed the remaining gaps — every row in the ClawAgents
-> column is now ✅.
+> The v6.5 hardening work, v6.6 Hermes-parity areas, v6.7.0 security fixes,
+> and v6.7.1 compact tool-discovery recovery now ship together in the current
+> release — every row in the ClawAgents column is ✅.
 
-| Feature | ClawAgents v6.6 | Hermes Agent | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.7.1 | Hermes Agent | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|:---:|
 | **Core** | | | | |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ |
@@ -782,25 +778,29 @@ All environment variables are **optional**. They serve as defaults when the corr
 | In-memory VFS (testing) | ✅ | ❌ | ❌ | ❌ |
 | Cross-provider conformance tests | ✅ | ✅ | ✅ | ❌ |
 | Lazy tool registry (deferred imports) | ✅ | ✅ | ❌ | ❌ |
+| Compact tool-universe discovery | ✅ | ❌ | ❌ | ❌ |
+| Tool lookup over names, descriptions, and keywords | ✅ | ❌ | ❌ | ❌ |
 | Tool result caching (LRU) | ✅ | ❌ | ❌ | ❌ |
 | JSON Schema param validation + coercion | ✅ | ✅ | ❌ | ❌ |
 | ComposeTool (deterministic pipelines) | ✅ | ❌ | ❌ | ❌ |
 | `think` tool (structured reasoning) | ✅ | ✅ | ❌ | ❌ |
 | LangChain.js tool adapter (`@langchain/core`) | ✅ | N/A | N/A | ❌ |
-| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ (v6.4) | ✅ | ❌ | ❌ |
-| Path-scoped parallel tool execution | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| MCP server integration (stdio / SSE / Streamable HTTP) | ✅ | ✅ | ❌ | ❌ |
+| Path-scoped parallel tool execution | ✅ | ✅ | ❌ | ❌ |
 | **Agents & Orchestration** | | | | |
 | Sub-agent delegation | ✅ | ✅ | ✅ | ✅ |
-| Subagent depth limit (≤ 2, no recursion) | ✅ (v6.5) | ✅ | ❌ | ❌ |
-| Subagent / forked-agent memory isolation | ✅ (v6.5) | ✅ | ✅ | ❌ |
-| Per-agent `IterationBudget` | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Subagent depth limit (≤ 2, no recursion) | ✅ | ✅ | ❌ | ❌ |
+| Subagent / forked-agent memory isolation | ✅ | ✅ | ✅ | ❌ |
+| Per-agent `IterationBudget` | ✅ | ✅ | ❌ | ❌ |
 | Coordinator / swarm mode | ✅ | ❌ | ❌ | ✅ |
 | Barrier-based request scheduling | ✅ | ❌ | ❌ | ❌ |
 | Planning / TodoList | ✅ | ✅ | ✅ | ❌ |
-| Plugin hook expansion (priority chain) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Plugin hook expansion (priority chain) | ✅ | ✅ | ❌ | ❌ |
 | **Providers & Resilience** | | | | |
 | Three-tier provider fallback + quarantine | ✅ | ✅ | ❌ | ❌ |
 | Native + text tool call repair | ✅ | ✅ | ✅ | ❌ |
+| Structured nonzero `execute` output | ✅ | ❌ | ❌ | ❌ |
+| Repeated command-failure recovery hints | ✅ | ❌ | ❌ | ❌ |
 | Streaming with stall detection | ✅ | ✅ | ❌ | ✅ |
 | Truncated JSON repair + retry | ✅ | ✅ | ❌ | ❌ |
 | Model-specific temperature override | ✅ | ✅ | ❌ | ❌ |
@@ -813,7 +813,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 | Pre-compact transcript archival | ✅ | ✅ | ❌ | ❌ |
 | Atomic file writes (crash-safe) | ✅ | ✅ | ❌ | ❌ |
 | Session persistence + resume | ✅ | ✅ | ❌ | ❌ |
-| Session heartbeat + auto-cleanup | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Session heartbeat + auto-cleanup | ✅ | ✅ | ❌ | ❌ |
 | Background memory extraction | ✅ | ✅ | ❌ | ❌ |
 | **Security & Hooks** | | | | |
 | Rich hook result model (block/redirect/inject) | ✅ | ✅ | ✅ | ✅ |
@@ -825,7 +825,7 @@ All environment variables are **optional**. They serve as defaults when the corr
 | **Skills** | | | | |
 | SKILL.md with constraint documents | ✅ | ✅ | ✅ | ✅ |
 | Skill eligibility gating (OS/bins/env) | ✅ | ✅ | ✅ | ❌ |
-| Runtime `displayClawagentsHome()` (path rendering in tool descriptions) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Runtime `displayClawagentsHome()` (path rendering in tool descriptions) | ✅ | ✅ | ❌ | ❌ |
 | **RL & Self-Improvement** | | | | |
 | Prompt-Time RL (PTRL) — learn from past runs | ✅ | ❌ | ❌ | ❌ |
 | Trajectory logging + run scoring | ✅ | ✅ | ❌ | ❌ |
@@ -836,22 +836,22 @@ All environment variables are **optional**. They serve as defaults when the corr
 | GRPO-inspired multi-sample comparison | ✅ | ❌ | ❌ | ❌ |
 | Task-type-aware verification | ✅ | ❌ | ❌ | ❌ |
 | LLM-as-Judge verification | ✅ | ✅ | ❌ | ❌ |
-| RL fine-tuning hooks (TRL / SLIME / Atropos) | ✅ (v6.6) | ✅ | ❌ | ❌ |
+| RL fine-tuning hooks (TRL / SLIME / Atropos) | ✅ | ✅ | ❌ | ❌ |
 | RFT-ready transition export | ✅ | ✅ | ❌ | ❌ |
 | **Infrastructure** | | | | |
 | Gateway HTTP server + SSE | ✅ | ✅ | ❌ | ✅ |
 | WebSocket gateway (`ws` optional dep) | ✅ | ✅ | ❌ | ✅ |
-| Activity heartbeats (prevent gateway false-timeouts) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Activity heartbeats (prevent gateway false-timeouts) | ✅ | ✅ | ❌ | ❌ |
 | Multi-channel messaging (Telegram, WhatsApp, Signal) | ✅ | ✅ (+ Discord, Slack, Feishu, WeChat, QQ) | ❌ | ✅ |
 | Per-session message serialization | ✅ | ✅ | ❌ | ✅ |
 | Error taxonomy + recovery recipes | ✅ | ✅ | ❌ | ❌ |
 | Prompt cache boundary (Anthropic) | ✅ | ✅ | ✅ | ❌ |
-| Prompt-cache-aware `CommandDef` (deferred state mutation) | ✅ (v6.5) | ✅ | ❌ | ❌ |
+| Prompt-cache-aware `CommandDef` (deferred state mutation) | ✅ | ✅ | ❌ | ❌ |
 | Lane-based command queue | ✅ | ✅ | ❌ | ✅ |
-| Hermetic test runner with concurrency pinning (`--test-concurrency=4`) | ✅ (v6.5) | ✅ | ❌ | ❌ |
-| Cron / scheduled jobs | ✅ (v6.6) | ✅ | ❌ | ❌ |
-| ACP (Agent Communication Protocol) adapter | ✅ (v6.6) | ✅ | ❌ | ❌ |
-| Browser tools (Playwright / CDP / Camoufox) | ✅ (v6.6) | ✅ | ❌ | ❌ |
+| Hermetic test runner with concurrency pinning (`--test-concurrency=4`) | ✅ | ✅ | ❌ | ❌ |
+| Cron / scheduled jobs | ✅ | ✅ | ❌ | ❌ |
+| ACP (Agent Communication Protocol) adapter | ✅ | ✅ | ❌ | ❌ |
+| Browser tools (Playwright / CDP / Camoufox) | ✅ | ✅ | ❌ | ❌ |
 
 ---
 
@@ -1520,12 +1520,14 @@ npm run build
 npx tsx --test src/tools/registry.test.ts
 ```
 
-The v6.5.0/v6.6.0 suites add dedicated regression coverage for the
+The v6.5/v6.6 suites add dedicated regression coverage for the
 Hermes-inspired patterns: `src/tools/subagent.test.ts` (depth limits + memory
 isolation), `src/paths.test.ts` (`displayClawagentsHome()`),
 `src/commands.test.ts` (`cacheImpact` + `--now`), `src/redact.test.ts`,
 `src/transport.test.ts`, `src/aux-models.test.ts`, `src/background.test.ts`,
 `src/steer.test.ts`, `src/mcp/env-scrub.test.ts`, plus the four v6.6 feature
 suites (`src/browser/browser.test.ts`, `src/cron/cron.test.ts`,
-`src/acp/acp.test.ts`, `src/rl/rl.test.ts`), alongside the existing
-`web.test.ts` / `simulated.test.ts` parity sweep.
+`src/acp/acp.test.ts`, `src/rl/rl.test.ts`). Current v6.7.1 coverage adds
+`src/infra-improvements.test.ts` for compact tool discovery, structured tool
+failure observations, recovery hints, and infrastructure behavior, alongside
+the existing `web.test.ts` / `simulated.test.ts` parity sweep.
