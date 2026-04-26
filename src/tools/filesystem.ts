@@ -241,9 +241,17 @@ function createGrepTool(sb: SandboxBackend): Tool {
                 if (targetStat?.isFile) {
                     const content = await sb.readFile(target, "utf-8");
                     const lines = content.split("\n");
-                    const matches = lines
-                        .map((line, i) => ({ line, num: i + 1 }))
-                        .filter(({ line }) => line.includes(pattern));
+                    const maxMatches = 100;
+                    const matches: Array<{ line: string; num: number }> = [];
+                    let truncated = false;
+                    for (let i = 0; i < lines.length; i++) {
+                        if (!lines[i]!.includes(pattern)) continue;
+                        if (matches.length >= maxMatches) {
+                            truncated = true;
+                            break;
+                        }
+                        matches.push({ line: lines[i]!, num: i + 1 });
+                    }
 
                     if (matches.length === 0) {
                         return { success: true, output: `No matches for "${pattern}" in ${target}` };
@@ -251,7 +259,8 @@ function createGrepTool(sb: SandboxBackend): Tool {
                     const output = matches
                         .map(({ line, num }) => `${String(num).padStart(4)}: ${line}`)
                         .join("\n");
-                    return { success: true, output: `${matches.length} match(es) in ${target}:\n${output}` };
+                    const suffix = truncated ? ` (truncated at ${maxMatches})` : "";
+                    return { success: true, output: `${matches.length} match(es) in ${target}${suffix}:\n${output}` };
                 }
 
                 if (!targetStat?.isDirectory) {

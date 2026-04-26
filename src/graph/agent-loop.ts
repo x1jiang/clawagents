@@ -1229,6 +1229,8 @@ export interface AgentLoopExtras<TContext = unknown> {
     outputType?: OutputTypeSpec;
     /** Pluggable conversation-history backend. */
     session?: Session;
+    /** Max prior session messages to preload; null disables the cap. */
+    sessionPreloadLimit?: number | null;
     /** Typed stream-event sink (in addition to the legacy `onEvent`). */
     onStreamEvent?: OnStreamEvent;
     /** Consulted when a tool call has no sticky approval on the RunContext. */
@@ -1293,6 +1295,9 @@ export async function runAgentGraph<TContext = unknown>(
     const outputGuardrails = extras?.outputGuardrails ?? [];
     const outputType = extras?.outputType;
     const sessionBackend: Session | undefined = extras?.session;
+    const sessionPreloadLimit = extras?.sessionPreloadLimit === undefined
+        ? 200
+        : extras.sessionPreloadLimit;
     const onStreamEvent = extras?.onStreamEvent;
     const approvalHandler = extras?.approvalHandler;
     const agentName = extras?.agentName ?? "ClawAgent";
@@ -1445,7 +1450,7 @@ export async function runAgentGraph<TContext = unknown>(
     let sessionStartCursor = messages.length;
     if (sessionBackend) {
         try {
-            const preloaded = await sessionBackend.getItems();
+            const preloaded = await sessionBackend.getItems(sessionPreloadLimit ?? undefined);
             if (preloaded.length > 0) {
                 messages.push(...preloaded);
                 emit("context", { message: `session: preloaded ${preloaded.length} item(s) from ${sessionBackend.constructor.name}` });

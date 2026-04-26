@@ -1,14 +1,14 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.1**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.2**
 
-> **v6.6.1 (April 2026)** — Patch/security hardening for the Hermes-parity
-> line. Parallel native tools now honor sticky approvals, the credential proxy
-> supports SDK base-URL mode without cross-origin credential injection, the
-> gateway refuses non-loopback unauthenticated startup, lazy schemas match the
-> real tool implementations, ACP accepts `ClawAgent.invoke()` agents, and the
-> package exports now include the documented subpaths. **489 tests** pass,
-> `tsc --noEmit` clean. See [Changelog](#changelog).
+> **v6.6.2 (April 2026)** — Performance and release hardening for the
+> Hermes-parity line. Persisted sessions now preload a bounded history by
+> default, large in-process diffs return bounded summaries instead of building
+> huge LCS tables, and single-file grep stops at the same match cap as
+> directory grep. The Python sibling also offloads local async filesystem I/O
+> and appends trajectory run summaries. **492 TypeScript tests** pass,
+> `tsc --noEmit` clean; **772 Python tests** pass. See [Changelog](#changelog).
 
 ## Installation
 
@@ -852,6 +852,26 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.6.2 — Efficiency and release hardening (April 2026)
+
+Patch release for the v6.6 line. Test totals after this release:
+**TypeScript 492 passed, 4 skipped**; **Python 772 passed, 3 skipped**;
+`tsc --noEmit` clean.
+
+- **Bounded session preload** — the agent loop now preloads at most 200 prior
+  session messages by default, while callers can pass
+  `sessionPreloadLimit: null` to explicitly hydrate the full persisted
+  history.
+- **Bounded large diffs** — the `diff` tool now returns a compact summary for
+  very large comparisons instead of allocating a large two-dimensional LCS
+  table; the fallback common-line path uses a `Set` lookup instead of nested
+  `includes()` scans.
+- **Single-file grep cap** — file-targeted grep now stops at 100 matches and
+  reports truncation, matching the existing directory grep behavior.
+- **Cross-package efficiency parity** — the Python sibling now offloads local
+  filesystem work from the event loop and appends trajectory run summaries
+  without rewriting the full run log.
+
 ### v6.6.1 — Approval, proxy, gateway, ACP, exports, and release hardening (April 2026)
 
 Patch/security release for the v6.6 line. Test totals after this release:
@@ -1377,14 +1397,14 @@ await router.startAll({
 ```bash
 npm install
 
-# Run the full test suite (passes on v6.6.1)
+# Run the full test suite (passes on v6.6.2)
 npm test
 
 # Hermetic runner — exactly the environment CI uses (pinned
 # --test-concurrency=4, TZ=UTC, NODE_ENV=test, credentials scrubbed)
 npm run test:hermetic
 
-# Type-check without emitting (clean, exit 0 on v6.6.1)
+# Type-check without emitting (clean, exit 0 on v6.6.2)
 npm run typecheck
 
 # Build dist/ (runs typecheck under the hood)

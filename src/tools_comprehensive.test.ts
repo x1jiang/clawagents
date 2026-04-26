@@ -40,6 +40,16 @@ async function sandboxedFs(root: string): Promise<{
     return { lsTool: lsTool!, readFileTool: readFileTool!, writeFileTool: writeFileTool!, editFileTool: editFileTool!, grepTool: grepTool!, globTool: globTool! };
 }
 
+async function sandboxedAdvancedFs(root: string): Promise<{
+    diffTool: import("./tools/registry.js").Tool;
+}> {
+    const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
+    const { LocalBackend } = await import("./sandbox/local.js");
+    const diffTool = createAdvancedFsTools(new LocalBackend(root))
+        .find((tool) => tool.name === "diff")!;
+    return { diffTool };
+}
+
 // ─── ls ──────────────────────────────────────────────────────────────────
 
 describe("lsTool", () => {
@@ -291,6 +301,50 @@ describe("grepTool", () => {
         });
         assert.equal(result.success, true);
         assert.ok(result.output.includes("No matches"));
+    });
+
+    it("caps matches when searching a single file", async () => {
+        const manyPath = join(tmp, "many.txt");
+        writeFileSync(
+            manyPath,
+            Array.from({ length: 150 }, (_, i) => `TODO ${i}`).join("\n"),
+        );
+        const { grepTool } = await sandboxedFs(tmp);
+        const result = await grepTool.execute({
+            path: manyPath,
+            pattern: "TODO",
+        });
+
+        assert.equal(result.success, true);
+        assert.ok(result.output.includes("100 match"));
+        assert.ok(result.output.includes("truncated at 100"));
+        assert.ok(!result.output.includes("TODO 149"));
+    });
+});
+
+// ─── diff ────────────────────────────────────────────────────────────────
+
+describe("diffTool", () => {
+    let tmp: string;
+
+    beforeEach(() => {
+        tmp = mkdtempSync(join(tmpdir(), "claw-test-"));
+    });
+
+    afterEach(() => rmSync(tmp, { recursive: true }));
+
+    it("returns a bounded summary for very large diffs", async () => {
+        const fileA = join(tmp, "a.txt");
+        const fileB = join(tmp, "b.txt");
+        writeFileSync(fileA, Array.from({ length: 4000 }, (_, i) => `left ${i}`).join("\n"));
+        writeFileSync(fileB, Array.from({ length: 4000 }, (_, i) => `right ${i}`).join("\n"));
+        const { diffTool } = await sandboxedAdvancedFs(tmp);
+
+        const result = await diffTool.execute({ file_a: fileA, file_b: fileB });
+
+        assert.equal(result.success, true);
+        assert.ok(result.output.includes("diff too large"));
+        assert.ok(result.output.length < 20_000);
     });
 });
 

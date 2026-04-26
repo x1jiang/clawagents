@@ -14,6 +14,9 @@ const IGNORE_DIRS = new Set([
     ".idea", ".vscode", "coverage", ".tox", ".mypy_cache",
 ]);
 
+const MAX_EXACT_DIFF_CELLS = 1_000_000;
+const MAX_LARGE_DIFF_LINES = 200;
+
 // ─── tree ──────────────────────────────────────────────────────────────────
 
 function createTreeTool(sb: SandboxBackend): Tool {
@@ -111,6 +114,17 @@ function createDiffTool(sb: SandboxBackend): Tool {
             try {
                 const linesA = (await sb.readFile(pathA, "utf-8")).split("\n");
                 const linesB = (await sb.readFile(pathB, "utf-8")).split("\n");
+                if (linesA.length * linesB.length > MAX_EXACT_DIFF_CELLS) {
+                    return {
+                        success: true,
+                        output: boundedLargeDiff(
+                            linesA, linesB,
+                            sb.relative(sb.cwd, pathA),
+                            sb.relative(sb.cwd, pathB),
+                            ctx,
+                        ),
+                    };
+                }
 
                 const result = unifiedDiff(
                     linesA, linesB,
@@ -125,6 +139,38 @@ function createDiffTool(sb: SandboxBackend): Tool {
             }
         },
     };
+}
+
+function boundedLargeDiff(a: string[], b: string[], nameA: string, nameB: string, ctx: number): string {
+    const lines = [
+        `--- ${nameA}`,
+        `+++ ${nameB}`,
+        `# diff too large for exact in-process comparison (${a.length} x ${b.length} lines); showing first ${MAX_LARGE_DIFF_LINES} changed line(s).`,
+    ];
+    const max = Math.max(a.length, b.length);
+    let shown = 0;
+    for (let i = 0; i < max && shown < MAX_LARGE_DIFF_LINES; i++) {
+        if (a[i] === b[i]) continue;
+        const start = Math.max(0, i - ctx);
+        const end = Math.min(max, i + ctx + 1);
+        for (let j = start; j < end && shown < MAX_LARGE_DIFF_LINES; j++) {
+            if (a[j] === b[j]) {
+                lines.push(` ${a[j] ?? b[j] ?? ""}`);
+            } else {
+                if (a[j] !== undefined && shown < MAX_LARGE_DIFF_LINES) {
+                    lines.push(`-${a[j]}`);
+                    shown++;
+                }
+                if (b[j] !== undefined && shown < MAX_LARGE_DIFF_LINES) {
+                    lines.push(`+${b[j]}`);
+                    shown++;
+                }
+            }
+        }
+        i = end - 1;
+    }
+    if (shown >= MAX_LARGE_DIFF_LINES) lines.push(`# truncated at ${MAX_LARGE_DIFF_LINES} changed line(s)`);
+    return lines.join("\n");
 }
 
 function unifiedDiff(a: string[], b: string[], nameA: string, nameB: string, ctx: number): string {
@@ -182,7 +228,8 @@ function computeLCS(a: string[], b: string[]): string[] {
     const m = a.length, n = b.length;
     if (m === 0 || n === 0) return [];
     if (m * n > 10_000_000) {
-        return a.filter((line) => b.includes(line));
+        const bLines = new Set(b);
+        return a.filter((line) => bLines.has(line));
     }
 
     const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
