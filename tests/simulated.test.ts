@@ -544,18 +544,15 @@ async function main() {
         "exec: `rm /tmp/foo` not blocked as dangerous"
     );
 
-    // Parity with Python clawagents_py: wget http / curl http blocked.
-    // Agents should use the web_fetch tool (which has SSRF guards) for HTTP,
-    // not raw shell utilities that bypass the protections.
     const wgetResult = await execTool.execute({ command: "wget http://example.com/secret" });
     assert(
-        !wgetResult.success && (wgetResult.error ?? "").includes("Blocked"),
-        "exec: `wget http://...` blocked (use web_fetch tool instead)"
+        wgetResult.success || !(wgetResult.error ?? "").includes("Blocked"),
+        "exec: bare `wget http://...` is allowed (NETWORK ALLOW)"
     );
     const curlResult = await execTool.execute({ command: "curl http://example.com/secret" });
     assert(
-        !curlResult.success && (curlResult.error ?? "").includes("Blocked"),
-        "exec: `curl http://...` blocked (use web_fetch tool instead)"
+        curlResult.success || !(curlResult.error ?? "").includes("Blocked"),
+        "exec: bare `curl http://...` is allowed (NETWORK ALLOW)"
     );
 
     // ━━━ 18. Stable Key Ordering in ToolCallTracker ━━━━━━━━━━━━━━━━━━━━

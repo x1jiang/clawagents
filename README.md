@@ -1,16 +1,18 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.4**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.7.0**
 
-> **v6.6.4 (April 2026)** — ToolUniverse-style discovery and infrastructure
-> parity release. Tool discovery now searches tool names, descriptions, and
-> explicit keyword aliases, so compact tool selection is less brittle when a
-> model uses a related term instead of the exact tool name. This release also
-> adds bounded tool profiles, Docker sandbox support, resumable `RunResult`
-> metadata, SQLite result caching for safe cacheable tools, explorer helpers,
-> gym-style eval aliases, and next-state trajectory exports across the
-> TypeScript and Python packages. **509 TypeScript tests** pass
-> (**49 parity checks**), `tsc --noEmit` clean; **786 Python tests** pass.
+> **v6.7.0 (April 2026)** — Security hardening release. Closes a cluster of
+> bypasses across the bash validator, the obfuscation detector, the
+> `web_fetch` SSRF protection, the `edit_file` tool, the `redact()` scrubber,
+> and the Docker sandbox env policy. Highlights: DNS-rebinding TOCTOU
+> eliminated by IP-pinned HTTP(S) connections; HTTPS→HTTP redirect downgrades
+> refused; null-byte / control-character commands blocked; `bash -c '<cmd>'`,
+> `(rm -rf /)`, `$(rm -rf /)`, double-space, `$HOME`-shaped, `tee /dev/sda`,
+> `find -exec sh -c`, `chmod -R 777 /` all now `BLOCK`; PEM blocks,
+> `Authorization: Bearer …`, AWS secret keys, and URL basic-auth credentials
+> redacted. **511 TypeScript tests** pass (**5 new** regression tests),
+> `tsc --noEmit` clean; **835 Python tests** pass (**44 new**).
 > See [Changelog](#changelog).
 
 ## Installation
@@ -856,6 +858,63 @@ All environment variables are **optional**. They serve as defaults when the corr
 ---
 
 ## Changelog
+
+### v6.7.0 — Security hardening across validator, web_fetch, redact, sandbox (April 2026)
+
+Minor release. Adversarial probing of the v6.6.4 surfaces uncovered a
+cluster of bypasses; this release closes them. Test totals after this
+release: **TypeScript 511 passed, 4 skipped**; **Python 835 passed,
+3 skipped**; `tsc --noEmit` clean. **49 new regression tests** ride
+alongside the fixes (5 TypeScript, 44 Python).
+
+**Bash validator hardening** — `validateBash` now walks every shell
+clause produced by splitting on `;` `&&` `||` `|` `&` and newlines,
+plus the contents of `(...)`, `$(...)`, backticks, and
+`bash -c '<cmd>'`/`sh -c '<cmd>'` wrappers; the strictest verdict
+across all clauses wins. The previous head-only inspection meant
+`ls && rm -rf /var/log`, `(rm -rf /)`, `echo $(rm -rf /)`, and
+`bash -c 'rm -rf /'` all silently passed. Additional shapes now
+`BLOCK`: `rm -rf "$HOME"` / `rm -rf $HOME/x` and any `rm` of a system
+directory; `tee /dev/sda` and `tee /etc/passwd` /
+`tee -a /etc/sudoers`; quoted block-device redirects (`>'/dev/sda'`);
+FD-prefixed redirects (`1>/dev/sda`); `find -exec sh -c '…'` and
+`find -execdir`; `chmod -R 777 /`; `sed --in-place` (long form,
+previously unrecognised). Null bytes and unprintable control
+characters in any command are also `BLOCK`.
+
+**Web fetch SSRF — DNS-rebinding TOCTOU eliminated** — `web_fetch`
+now uses Node's `http`/`https` modules to connect to the validated
+IP directly, sending the original hostname via the `Host` header and
+SNI. A controlled DNS server can no longer return a public address
+to the validator and a private one to the actual fetch. Body reads
+are bounded at 4 MiB and aborted streamingly. Each redirect hop
+gets its own timeout (the previous `AbortController` was reused
+across hops, shrinking the budget unpredictably). `Location` headers
+that downgrade HTTPS → HTTP across a redirect are refused.
+
+**`edit_file` empty-target corruption** — `target=""` plus
+`replace_all=true` previously inserted the replacement between every
+character of the file, silently corrupting it. Now refused.
+
+**Docker sandbox env policy** — `isSensitiveEnv` now reuses
+`isSecretName()` from `redact.ts` plus a small extras regex covering
+vendor-prefixed shapes (`GITHUB_PAT`, `STRIPE_SK_LIVE`,
+`DATABASE_URL`, `DSN`); the previous end-anchored regex missed
+`AWS_SECRET_ACCESS_KEY`, `GITHUB_PAT`, `DATABASE_PASSWORD_PROD`, etc.
+and forwarded them into containers via `-e`.
+
+**Concurrency / quality** — `RetryPolicy.shouldRetry` now correctly
+allows `maxRetries=N` to perform `N` retries (was off-by-one);
+`jitter` is clamped to `[0, 1]` so a caller passing `1.5` can't
+produce zero-delay retry storms. `MCPServerManager.start` tracks
+connected servers so a partial-failure first run doesn't double-
+register tools on retry; `shutdown` now aggregates errors into a
+thrown `Error` instead of a span no caller observes.
+`compressMessagesSafe` no longer produces two consecutive same-role
+messages when the head is empty (Anthropic rejects that). The
+overbroad `"curl http"` / `"wget http"` legacy substring is removed
+— the bash validator's NETWORK classification now applies cleanly to
+`https://` URLs.
 
 ### v6.6.4 — Keyword discovery and infrastructure parity (April 2026)
 

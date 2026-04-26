@@ -3,11 +3,17 @@ import { access, mkdir, readFile, readdir, stat as fsStat, writeFile } from "nod
 import { realpathSync } from "node:fs";
 import { promisify } from "node:util";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { isSecretName } from "../redact.js";
 import type { DirEntry, ExecResult, FileStat, SandboxBackend } from "./backend.js";
 
 const execFile = promisify(execFileCb);
 
-const SENSITIVE_ENV_RE = /(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY)$/i;
+const SANDBOX_EXTRA_ENV_RE =
+    /(?:SK[_-]?LIVE|SK[_-]?TEST|GITHUB[_-]?PAT|DATABASE[_-]?URL|CONNECTION[_-]?STRING|DSN)/i;
+
+function isSensitiveEnv(name: string): boolean {
+    return isSecretName(name) || SANDBOX_EXTRA_ENV_RE.test(name);
+}
 
 export interface DockerBackendOptions {
     root?: string;
@@ -106,7 +112,7 @@ export class DockerBackend implements SandboxBackend {
             "-w", containerCwd,
         ];
         for (const [key, value] of Object.entries(opts.env ?? {})) {
-            if (!SENSITIVE_ENV_RE.test(key)) args.push("-e", `${key}=${value}`);
+            if (!isSensitiveEnv(key)) args.push("-e", `${key}=${value}`);
         }
         args.push(this.image, "sh", "-lc", command);
         return args;

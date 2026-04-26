@@ -24,11 +24,14 @@
  */
 
 import { lookup } from "node:dns/promises";
+import * as http from "node:http";
+import * as https from "node:https";
 import { isIP } from "node:net";
 
 import type { Tool, ToolResult } from "./registry.js";
 
 const MAX_RESPONSE_CHARS = 50_000;
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // 4 MiB hard cap on body bytes
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 5;
 const ALLOWED_SCHEMES = new Set(["http:", "https:"]);
@@ -69,8 +72,9 @@ function isPrivateIp(ip: string): boolean {
     return true; // unparseable — fail closed
 }
 
-async function isPrivateHost(host: string): Promise<boolean> {
+async function isPrivateHost(host: string, resolved?: string[]): Promise<boolean> {
     if (!host) return true;
+    if (resolved !== undefined) return resolved.some(isPrivateIp);
     if (isIP(host)) return isPrivateIp(host);
     try {
         const records = await lookup(host, { all: true });
@@ -89,6 +93,150 @@ export const ssrfDeps = {
     isPrivateHost,
     isPrivateIp,
 };
+
+type PinnedTarget = {
+    scheme: "http:" | "https:";
+    hostname: string;
+    port: number;
+    ip: string;
+    path: string;
+};
+
+/** Resolve once, validate, and return the IP we pinned to. The validity
+ * decision uses ``ssrfDeps.isPrivateHost`` so tests can monkey-patch it.
+ */
+async function validateAndPin(
+    target: string,
+    allowPrivate: boolean,
+): Promise<PinnedTarget | string> {
+    let parsed: URL;
+    try {
+        parsed = new URL(target);
+    } catch {
+        return `Invalid URL: ${target}`;
+    }
+    if (!ALLOWED_SCHEMES.has(parsed.protocol)) {
+        return `Refusing scheme '${parsed.protocol}'. web_fetch only allows http/https.`;
+    }
+    const hostname = parsed.hostname;
+    if (!hostname) return `Invalid URL (no host): ${target}`;
+
+    let ip: string;
+    let resolved: string[] | undefined;
+    if (isIP(hostname)) {
+        ip = hostname;
+    } else {
+        try {
+            const records = await lookup(hostname, { all: true });
+            if (records.length === 0) {
+                return `DNS lookup returned no records for '${hostname}'`;
+            }
+            resolved = records.map(r => r.address);
+            ip = resolved[0];
+        } catch (e) {
+            return `DNS lookup failed for '${hostname}': ${String(e)}`;
+        }
+    }
+
+    if (!allowPrivate && (await ssrfDeps.isPrivateHost(hostname, resolved))) {
+        return (
+            `Refusing to fetch '${hostname}': resolves to a private/loopback/` +
+            "link-local/reserved address. Set CLAWAGENTS_WEB_ALLOW_PRIVATE=1 to override."
+        );
+    }
+
+    const scheme = parsed.protocol as "http:" | "https:";
+    const port = parsed.port
+        ? Number(parsed.port)
+        : (scheme === "https:" ? 443 : 80);
+    const path = (parsed.pathname || "/") + (parsed.search || "");
+    return { scheme, hostname, port, ip, path };
+}
+
+/** Issue one HTTP(S) request to a *specific* IP, sending the original
+ * hostname as ``Host`` and SNI. Bounds body size at MAX_RESPONSE_BYTES.
+ */
+function fetchPinned(
+    target: PinnedTarget,
+    timeoutMs: number,
+): Promise<
+    | { status: number; headers: Record<string, string>; bodyBytes: Buffer }
+    | { error: string }
+> {
+    return new Promise(resolve => {
+        const isTls = target.scheme === "https:";
+        const requestFn = isTls ? https.request : http.request;
+        const req = requestFn(
+            {
+                host: target.ip,
+                port: target.port,
+                path: target.path,
+                method: "GET",
+                headers: {
+                    Host:
+                        target.port === (isTls ? 443 : 80)
+                            ? target.hostname
+                            : `${target.hostname}:${target.port}`,
+                    "User-Agent": "ClawAgents/1.0",
+                    "Accept-Encoding": "identity",
+                    Connection: "close",
+                },
+                ...(isTls ? { servername: target.hostname } : {}),
+            } as http.RequestOptions,
+            res => {
+                const status = res.statusCode ?? 0;
+                const rawHeaders = res.headers as Record<string, string | string[] | undefined>;
+                const headers: Record<string, string> = {};
+                for (const k of Object.keys(rawHeaders)) {
+                    const v = rawHeaders[k];
+                    headers[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : (v ?? "");
+                }
+                const chunks: Buffer[] = [];
+                let total = 0;
+                let aborted = false;
+                res.on("data", chunk => {
+                    if (aborted) return;
+                    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                    if (total + buf.length > MAX_RESPONSE_BYTES) {
+                        const remaining = MAX_RESPONSE_BYTES - total;
+                        if (remaining > 0) chunks.push(buf.subarray(0, remaining));
+                        aborted = true;
+                        // Stop reading further data from the socket.
+                        res.destroy();
+                        return;
+                    }
+                    chunks.push(buf);
+                    total += buf.length;
+                });
+                res.on("end", () => {
+                    resolve({ status, headers, bodyBytes: Buffer.concat(chunks) });
+                });
+                res.on("error", err => {
+                    // Treat aborted-mid-stream after we hit the cap as success.
+                    if (aborted) {
+                        resolve({ status, headers, bodyBytes: Buffer.concat(chunks) });
+                    } else {
+                        resolve({ error: `web_fetch failed: ${String(err)}` });
+                    }
+                });
+            },
+        );
+        const timer = setTimeout(() => {
+            req.destroy(new Error("timeout"));
+        }, timeoutMs);
+        req.on("error", err => {
+            clearTimeout(timer);
+            const msg = String(err);
+            if (msg.includes("timeout")) {
+                resolve({ error: `Request timed out after ${timeoutMs}ms` });
+            } else {
+                resolve({ error: `web_fetch failed: ${msg}` });
+            }
+        });
+        req.on("close", () => clearTimeout(timer));
+        req.end();
+    });
+}
 
 function stripHtml(html: string): string {
     return html
@@ -132,43 +280,22 @@ export const webFetchTool: Tool = {
             (process.env["CLAWAGENTS_WEB_ALLOW_PRIVATE"] ?? "").trim().toLowerCase(),
         );
 
-        const validateHop = async (target: string): Promise<string | null> => {
-            let parsedHop: URL;
-            try {
-                parsedHop = new URL(target);
-            } catch {
-                return `Invalid URL: ${target}`;
-            }
-            if (!ALLOWED_SCHEMES.has(parsedHop.protocol)) {
-                return `Refusing scheme '${parsedHop.protocol}'. web_fetch only allows http/https.`;
-            }
-            if (!allowPrivate && (await ssrfDeps.isPrivateHost(parsedHop.hostname))) {
-                return (
-                    `Refusing to fetch '${parsedHop.hostname}': resolves to a private/loopback/` +
-                    "link-local/reserved address. Set CLAWAGENTS_WEB_ALLOW_PRIVATE=1 to override."
-                );
-            }
-            return null;
-        };
-
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeout);
-
         try {
             let current = url;
             for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-                const err = await validateHop(current);
-                if (err) {
-                    return { success: false, output: "", error: err };
+                const validation = await validateAndPin(current, allowPrivate);
+                if (typeof validation === "string") {
+                    return { success: false, output: "", error: validation };
                 }
 
-                const resp = await fetch(current, {
-                    signal: controller.signal,
-                    headers: { "User-Agent": "ClawAgents/1.0" },
-                    redirect: "manual",
-                });
+                const fetched = await fetchPinned(validation, timeout);
+                if ("error" in fetched) {
+                    return { success: false, output: "", error: fetched.error };
+                }
 
-                if (resp.status >= 300 && resp.status < 400) {
+                const { status, headers, bodyBytes } = fetched;
+
+                if (status >= 300 && status < 400) {
                     if (hop >= MAX_REDIRECTS) {
                         return {
                             success: false,
@@ -176,24 +303,38 @@ export const webFetchTool: Tool = {
                             error: `Too many redirects (>${MAX_REDIRECTS}) starting at ${url}`,
                         };
                     }
-                    const location = resp.headers.get("location");
+                    const location = headers["location"];
                     if (!location) {
                         return {
                             success: false,
                             output: "",
-                            error: `HTTP ${resp.status} without Location header at ${current}`,
+                            error: `HTTP ${status} without Location header at ${current}`,
                         };
                     }
-                    current = new URL(location, current).toString();
+                    const nextUrl = new URL(location, current).toString();
+                    // Refuse a silent TLS downgrade across the redirect.
+                    // An attacker who controls the next hop can otherwise
+                    // strip TLS by pointing Location at http://.
+                    if (
+                        validation.scheme === "https:" &&
+                        nextUrl.toLowerCase().startsWith("http://")
+                    ) {
+                        return {
+                            success: false,
+                            output: "",
+                            error: "Refusing redirect: HTTPS endpoint sent a Location pointing to http:// (TLS downgrade)",
+                        };
+                    }
+                    current = nextUrl;
                     continue;
                 }
 
-                if (!resp.ok) {
-                    return { success: false, output: "", error: `HTTP ${resp.status}: ${resp.statusText}` };
+                if (status < 200 || status >= 300) {
+                    return { success: false, output: "", error: `HTTP ${status}` };
                 }
 
-                const contentType = resp.headers.get("content-type") ?? "";
-                let body = await resp.text();
+                const contentType = headers["content-type"] ?? "";
+                let body = bodyBytes.toString("utf-8");
 
                 if (body.length > MAX_RESPONSE_CHARS) {
                     body =
@@ -205,7 +346,7 @@ export const webFetchTool: Tool = {
                     body = stripHtml(body);
                 }
 
-                return { success: true, output: `[${resp.status}] ${current}\n\n${body}` };
+                return { success: true, output: `[${status}] ${current}\n\n${body}` };
             }
 
             return {
@@ -214,13 +355,7 @@ export const webFetchTool: Tool = {
                 error: `Too many redirects (>${MAX_REDIRECTS}) starting at ${url}`,
             };
         } catch (err) {
-            const msg = String(err);
-            if (msg.includes("abort")) {
-                return { success: false, output: "", error: `Request timed out after ${timeout}ms` };
-            }
-            return { success: false, output: "", error: `web_fetch failed: ${msg}` };
-        } finally {
-            clearTimeout(timer);
+            return { success: false, output: "", error: `web_fetch failed: ${String(err)}` };
         }
     },
 };

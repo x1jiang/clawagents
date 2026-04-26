@@ -270,14 +270,30 @@ export async function compressMessagesSafe(params: {
         };
     }
 
-    const lastHeadRole = head.length > 0 ? head[head.length - 1]!.role : "user";
-    const firstTailRole = tail.length > 0 ? tail[0]!.role : "user";
-    let summaryRole: AgentMessage["role"] =
-        lastHeadRole === "assistant" ? "user" : "assistant";
-    if (summaryRole === firstTailRole) {
-        const flipped: AgentMessage["role"] =
-            summaryRole === "assistant" ? "user" : "assistant";
-        if (flipped !== lastHeadRole) summaryRole = flipped;
+    // Choose a role for the summary message that doesn't produce two
+    // consecutive same-role turns (Anthropic rejects that). Priority:
+    //   1. If we have a head, default to flipping its last role.
+    //   2. If that still collides with the tail's first role, flip again
+    //      — but only if the flip doesn't collide with the head.
+    //   3. If we have no head, just take the opposite of the tail's
+    //      first role (lastHeadRole's "user" fallback isn't a real
+    //      constraint when head is empty).
+    const headHasMessages = head.length > 0;
+    const lastHeadRole: AgentMessage["role"] | null = headHasMessages
+        ? head[head.length - 1]!.role
+        : null;
+    const firstTailRole: AgentMessage["role"] | null =
+        tail.length > 0 ? tail[0]!.role : null;
+    let summaryRole: AgentMessage["role"];
+    if (!headHasMessages) {
+        summaryRole = firstTailRole === "assistant" ? "user" : "assistant";
+    } else {
+        summaryRole = lastHeadRole === "assistant" ? "user" : "assistant";
+        if (firstTailRole !== null && summaryRole === firstTailRole) {
+            const flipped: AgentMessage["role"] =
+                summaryRole === "assistant" ? "user" : "assistant";
+            if (flipped !== lastHeadRole) summaryRole = flipped;
+        }
     }
 
     const summaryMsg: AgentMessage = { role: summaryRole, content: summary };

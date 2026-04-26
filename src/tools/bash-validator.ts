@@ -78,7 +78,17 @@ const WRITE_PROGRAMS = new Set([
 ]);
 
 const FORK_BOMB_RE = /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
-const REDIRECT_TO_BLOCK_DEV_RE = />\s*\/dev\/(?:sd[a-z]+|nvme\d+|hd[a-z]+|disk\d+)/;
+const REDIRECT_TO_BLOCK_DEV_RE =
+    /(?:^|[^>])>+\s*['"]?\s*\/dev\/(?:sd[a-z]+|nvme\d+|hd[a-z]+|disk\d+)/;
+const TEE_BLOCK_DEV_RE =
+    /\btee\b\s+(?:-\S+\s+)*['"]?\/dev\/(?:sd[a-z]+|nvme\d+|hd[a-z]+|disk\d+)/;
+const TEE_SENSITIVE_RE =
+    /\btee\b\s+(?:-\S+\s+)*['"]?(?:\/etc\/(?:passwd|shadow|sudoers|hosts|ssh\/|pam\.d\/)|\/root\/|\/var\/spool\/cron\/)/i;
+const REDIRECT_TO_VAR_RE = />+\s*\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/;
+const SHELL_C_RE =
+    /\b(?:bash|sh|zsh|dash|ksh|fish)\s+(?:-\S+\s+)*-c\s+(?:'([^']*)'|"([^"]*)"|(\S+))/g;
+const CLAUSE_SEP_RE = /\s*(?:\|\||&&|\||;|&|\n)\s*/;
+const SUBST_RE = /\$\(([^()]+)\)|`([^`]+)`/g;
 const GIT_READ_SUBCMD = new Set([
     "status", "log", "diff", "show", "blame", "branch", "remote",
     "config", "describe", "ls-files", "ls-tree", "rev-parse",
@@ -113,17 +123,41 @@ function splitFirstToken(command: string): { program: string; tokens: string[] }
     return { program: tokens[0], tokens };
 }
 
+const ROOT_LIKE_LITERALS = new Set([
+    "", "/", "/*", ".", "./*", "..", "*", "~", "~/", "$HOME", "${HOME}",
+]);
+
+const SYSTEM_ROOTS = [
+    "/etc", "/var", "/usr", "/lib", "/lib64", "/sbin", "/bin", "/boot",
+    "/opt", "/srv", "/sys", "/proc", "/dev", "/private", "/Users",
+    "/home", "/root", "/Library", "/Applications", "/System",
+];
+
+function isRootLikePath(rawPath: string): boolean {
+    let p = rawPath.trim().replace(/^['"]|['"]$/g, "");
+    p = p.replace(/\/+$/, "") || "/";
+    if (ROOT_LIKE_LITERALS.has(p)) return true;
+    if (p.startsWith("~") || p.startsWith("$HOME") || p.startsWith("${HOME}")) return true;
+    for (const d of SYSTEM_ROOTS) {
+        if (p === d || p.startsWith(d + "/")) return true;
+    }
+    return false;
+}
+
 function classifyRm(tokens: string[]): BashDecision {
-    const flags = tokens.slice(1).filter((t) => t.startsWith("-"));
-    const paths = tokens.slice(1).filter((t) => !t.startsWith("-"));
-    const hasRecursive = flags.some((f) => /[rR]/.test(f.replace(/^-+/, "")));
-    const hasForce = flags.some((f) => /f/.test(f.replace(/^-+/, "")));
-    const badTargets = new Set(["/", "/*", ".", "./*", "..", "*", "~", "~/"]);
-    if (paths.some((p) => badTargets.has(p)) && (hasRecursive || hasForce)) {
+    const args = tokens.slice(1).filter((t) => t !== "--");
+    const flags = args.filter((t) => t.startsWith("-"));
+    const paths = args.filter((t) => !t.startsWith("-"));
+    const longRecursive = flags.includes("--recursive") || flags.includes("-R") || flags.includes("-r");
+    const longForce = flags.includes("--force");
+    const shortFlags = flags.filter((f) => !f.startsWith("--")).map((f) => f.replace(/^-+/, ""));
+    const hasRecursive = longRecursive || shortFlags.some((f) => /[rR]/.test(f));
+    const hasForce = longForce || shortFlags.some((f) => /f/.test(f));
+    if (paths.some(isRootLikePath) && (hasRecursive || hasForce)) {
         return {
             category: CommandCategory.DESTRUCTIVE,
             decision: Decision.BLOCK,
-            reason: `rm with recursive/force on root-like target (${JSON.stringify(paths)})`,
+            reason: `rm with recursive/force on root-like or system target (${JSON.stringify(paths)})`,
             matchedPattern: "rm -rf <root>",
         };
     }
@@ -161,6 +195,9 @@ function classifyDd(tokens: string[]): BashDecision {
     };
 }
 
+const FIND_EXEC_FLAGS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const FIND_SHELL_PROGRAMS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+
 function classifyFind(tokens: string[]): BashDecision {
     const args = tokens.slice(1);
     if (args.includes("-delete")) {
@@ -171,14 +208,35 @@ function classifyFind(tokens: string[]): BashDecision {
             matchedPattern: "find -delete",
         };
     }
-    const execIdx = args.indexOf("-exec");
-    if (execIdx >= 0 && execIdx + 1 < args.length && args[execIdx + 1].endsWith("rm")) {
-        return {
-            category: CommandCategory.DESTRUCTIVE,
-            decision: Decision.BLOCK,
-            reason: "find -exec rm recursively removes matched paths",
-            matchedPattern: "find -exec rm",
-        };
+    let i = 0;
+    while (i < args.length) {
+        if (FIND_EXEC_FLAGS.has(args[i])) {
+            const flag = args[i];
+            let j = i + 1;
+            while (j < args.length && args[j] !== ";" && args[j] !== "+" && args[j] !== "\\;") {
+                const base = args[j].split("/").pop() || args[j];
+                if (base === "rm" || base === "shred") {
+                    return {
+                        category: CommandCategory.DESTRUCTIVE,
+                        decision: Decision.BLOCK,
+                        reason: `find ${flag} ${base} recursively removes matched paths`,
+                        matchedPattern: `find ${flag} ${base}`,
+                    };
+                }
+                if (FIND_SHELL_PROGRAMS.has(base)) {
+                    return {
+                        category: CommandCategory.DESTRUCTIVE,
+                        decision: Decision.BLOCK,
+                        reason: `find ${flag} ${base} -c <cmd> obscures the executed command`,
+                        matchedPattern: `find ${flag} ${base}`,
+                    };
+                }
+                j++;
+            }
+            i = j;
+        } else {
+            i++;
+        }
     }
     return {
         category: CommandCategory.READ_ONLY,
@@ -201,8 +259,8 @@ function classifyChmodChown(tokens: string[]): BashDecision {
     ) {
         return {
             category: CommandCategory.SYSTEM_ADMIN,
-            decision: Decision.WARN,
-            reason: "chmod -R 777 / opens the entire filesystem; reviewing",
+            decision: Decision.BLOCK,
+            reason: "chmod -R 777 / opens the entire filesystem",
             matchedPattern: "chmod -R 777 /",
         };
     }
@@ -292,7 +350,11 @@ function classifyGit(tokens: string[]): BashDecision {
 function classifySed(tokens: string[]): BashDecision {
     const args = tokens.slice(1);
     const inPlace = args.some(
-        (a) => a === "-i" || (a.startsWith("-i") && !a.startsWith("--include")),
+        (a) =>
+            a === "-i" ||
+            (a.startsWith("-i") && !a.startsWith("--")) ||
+            a === "--in-place" ||
+            a.startsWith("--in-place="),
     );
     if (inPlace) {
         return {
@@ -310,51 +372,53 @@ function classifySed(tokens: string[]): BashDecision {
     };
 }
 
-/**
- * Classify a bash command and decide ALLOW / WARN / BLOCK.
- *
- * The decision is advisory: callers (the exec tool) decide what to do
- * with WARN — typically prepending a notice to the output and proceeding.
- * BLOCK should always cause a refusal.
+function stripSubshell(s: string): string {
+    let out = s.trim();
+    while (out.startsWith("(") && out.endsWith(")")) {
+        out = out.slice(1, -1).trim();
+    }
+    return out;
+}
+
+/** Walk a command, return every shell clause it executes (after splitting
+ * on `;` `&&` `||` `|` `&` and newline) plus the contents of any `$(...)`
+ * or backtick command substitution and any `bash -c '<cmd>'` payload.
  */
-export function validateBash(command: string): BashDecision {
-    const raw = (command ?? "").trim();
-    if (!raw) {
-        return {
-            category: CommandCategory.UNKNOWN,
-            decision: Decision.ALLOW,
-            reason: "empty command",
-            matchedPattern: "",
-        };
+function collectClauses(command: string): string[] {
+    const out: string[] = [];
+    const work: string[] = [stripSubshell(command)];
+    const seen = new Set<string>();
+    while (work.length > 0) {
+        const s = work.pop()!;
+        if (seen.has(s)) continue;
+        seen.add(s);
+        // Substitutions.
+        let m: RegExpExecArray | null;
+        SUBST_RE.lastIndex = 0;
+        while ((m = SUBST_RE.exec(s)) !== null) {
+            const inner = stripSubshell(m[1] ?? m[2] ?? "");
+            if (inner) work.push(inner);
+        }
+        // bash -c / sh -c payloads.
+        SHELL_C_RE.lastIndex = 0;
+        while ((m = SHELL_C_RE.exec(s)) !== null) {
+            const inner = stripSubshell(m[1] ?? m[2] ?? m[3] ?? "");
+            if (inner) work.push(inner);
+        }
+        // Top-level operator splits.
+        for (const part of s.split(CLAUSE_SEP_RE)) {
+            const stripped = stripSubshell(part);
+            if (stripped) out.push(stripped);
+        }
     }
+    return out;
+}
 
-    if (FORK_BOMB_RE.test(raw)) {
-        return {
-            category: CommandCategory.DESTRUCTIVE,
-            decision: Decision.BLOCK,
-            reason: "fork bomb detected",
-            matchedPattern: ":(){ :|:& };:",
-        };
-    }
-    if (REDIRECT_TO_BLOCK_DEV_RE.test(raw)) {
-        return {
-            category: CommandCategory.DESTRUCTIVE,
-            decision: Decision.BLOCK,
-            reason: "redirect into a block device wipes the disk",
-            matchedPattern: "> /dev/sd*",
-        };
-    }
+function severity(d: BashDecision): number {
+    return d.decision === Decision.BLOCK ? 2 : d.decision === Decision.WARN ? 1 : 0;
+}
 
-    const { program, tokens } = splitFirstToken(raw);
-    if (!program) {
-        return {
-            category: CommandCategory.UNKNOWN,
-            decision: Decision.ALLOW,
-            reason: "no program name found",
-            matchedPattern: "",
-        };
-    }
-
+function dispatchProgram(program: string, tokens: string[]): BashDecision {
     if (program === "rm") return classifyRm(tokens);
     if (program === "dd") return classifyDd(tokens);
     if (program === "find") return classifyFind(tokens);
@@ -437,4 +501,105 @@ export function validateBash(command: string): BashDecision {
         reason: `${program} not specifically classified; default ALLOW`,
         matchedPattern: program,
     };
+}
+
+function validateSingleClause(raw: string): BashDecision {
+    if (REDIRECT_TO_BLOCK_DEV_RE.test(raw)) {
+        return {
+            category: CommandCategory.DESTRUCTIVE,
+            decision: Decision.BLOCK,
+            reason: "redirect into a block device wipes the disk",
+            matchedPattern: "> /dev/sd*",
+        };
+    }
+    if (TEE_BLOCK_DEV_RE.test(raw)) {
+        return {
+            category: CommandCategory.DESTRUCTIVE,
+            decision: Decision.BLOCK,
+            reason: "tee into a block device wipes the disk",
+            matchedPattern: "tee /dev/sd*",
+        };
+    }
+    if (TEE_SENSITIVE_RE.test(raw)) {
+        return {
+            category: CommandCategory.SYSTEM_ADMIN,
+            decision: Decision.BLOCK,
+            reason: "tee into a privileged config path can subvert system trust",
+            matchedPattern: "tee /etc/...",
+        };
+    }
+    if (REDIRECT_TO_VAR_RE.test(raw)) {
+        return {
+            category: CommandCategory.WRITE,
+            decision: Decision.WARN,
+            reason: "redirecting to an unquoted variable target — verify it",
+            matchedPattern: ">$VAR",
+        };
+    }
+
+    const { program, tokens } = splitFirstToken(raw);
+    if (!program) {
+        return {
+            category: CommandCategory.UNKNOWN,
+            decision: Decision.ALLOW,
+            reason: "no program name found",
+            matchedPattern: "",
+        };
+    }
+    return dispatchProgram(program, tokens);
+}
+
+/**
+ * Classify a bash command and decide ALLOW / WARN / BLOCK.
+ *
+ * Compound commands (`;` `&&` `||` `|` `&`), subshells (`(...)`), and
+ * command substitutions (`$(...)` / backticks) are each validated; the
+ * strictest decision wins.
+ */
+export function validateBash(command: string): BashDecision {
+    const raw = (command ?? "").trim();
+    if (!raw) {
+        return {
+            category: CommandCategory.UNKNOWN,
+            decision: Decision.ALLOW,
+            reason: "empty command",
+            matchedPattern: "",
+        };
+    }
+
+    // Refuse null bytes and unprintable control characters — they don't
+    // appear in legitimate shell input and are a classic evasion vector
+    // (``rm -rf /\\x00`` is examined as a non-root path but the C-level
+    // path API truncates at the null and operates on ``/``).
+    for (let i = 0; i < raw.length; i++) {
+        const code = raw.charCodeAt(i);
+        if (code === 0 || (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d)) {
+            return {
+                category: CommandCategory.DESTRUCTIVE,
+                decision: Decision.BLOCK,
+                reason: "command contains a null byte or unprintable control character",
+                matchedPattern: "<NUL>",
+            };
+        }
+    }
+
+    // Whole-command shape checks that don't survive clause splitting.
+    if (FORK_BOMB_RE.test(raw)) {
+        return {
+            category: CommandCategory.DESTRUCTIVE,
+            decision: Decision.BLOCK,
+            reason: "fork bomb detected",
+            matchedPattern: ":(){ :|:& };:",
+        };
+    }
+
+    const clauses = collectClauses(raw);
+    const list = clauses.length > 0 ? clauses : [raw];
+    let worst: BashDecision | null = null;
+    for (const clause of list) {
+        const d = validateSingleClause(clause);
+        if (d.decision === Decision.BLOCK) return d;
+        if (worst === null || severity(d) > severity(worst)) worst = d;
+    }
+    return worst!;
 }

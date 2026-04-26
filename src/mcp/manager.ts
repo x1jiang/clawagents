@@ -24,6 +24,7 @@ export class MCPServerManager {
 
     private _started = false;
     private _registeredToolNames: string[] = [];
+    private _connectedServers = new Set<MCPServer>();
 
     constructor(servers: Iterable<MCPServer>, opts: MCPServerManagerOptions = {}) {
         this.servers = Array.from(servers);
@@ -45,7 +46,11 @@ export class MCPServerManager {
             "mcp.manager.start",
             async () => {
                 for (const server of this.servers) {
+                    // Skip servers we already connected on a prior partial
+                    // run — re-registering would create duplicate tools.
+                    if (this._connectedServers.has(server)) continue;
                     await server.connect();
+                    this._connectedServers.add(server);
                     const tools = await server.listTools();
                     const namePrefix = this.namePrefixWithServer ? server.name : undefined;
                     for (const descriptor of tools) {
@@ -74,18 +79,28 @@ export class MCPServerManager {
         await customSpan(
             "mcp.manager.shutdown",
             async () => {
+                const errors: { server: string; error: unknown }[] = [];
                 for (const server of this.servers) {
                     try {
                         await server.shutdown();
                     } catch (err) {
+                        errors.push({ server: server.name, error: err });
                         customSpan(
                             "mcp.manager.shutdown_error",
                             () => undefined,
                             { server: server.name, error: String(err) },
                         );
+                    } finally {
+                        this._connectedServers.delete(server);
                     }
                 }
                 this._started = false;
+                if (errors.length > 0) {
+                    const summary = errors
+                        .map(e => `${e.server}: ${String(e.error)}`)
+                        .join("; ");
+                    throw new Error(`MCP shutdown failures — ${summary}`);
+                }
             },
             { server_count: this.servers.length },
         );

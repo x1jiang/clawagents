@@ -164,6 +164,17 @@ function createEditFileTool(sb: SandboxBackend): Tool {
             const replacement = String(args["replacement"] ?? "");
             const replaceAll = Boolean(args["replace_all"] ?? false);
 
+            // Empty target is never valid: ``content.replaceAll("", repl)``
+            // would insert ``repl`` between every character, silently
+            // corrupting the file.
+            if (target === "") {
+                return {
+                    success: false,
+                    output: "",
+                    error: "edit_file failed: 'target' must be a non-empty string.",
+                };
+            }
+
             try {
                 const filePath = sb.safePath(String(args["path"] ?? ""));
                 if (!(await sb.exists(filePath))) {

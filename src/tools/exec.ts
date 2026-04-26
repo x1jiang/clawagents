@@ -30,14 +30,16 @@ import { toolSpan } from "../tracing/index.js";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_CHARS = 10_000;
 
+// Legacy substring backstop — must never widen policy beyond the bash
+// validator. Substring match, so anything added here that overlaps with
+// a valid command (e.g. `"curl http"` matching `https://`) breaks real
+// workloads.
 const BLOCKED_PATTERNS = [
-    "rm -rf /", "rm -rf /*", "rm -rf .", "rm -rf ~",
-    "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:",
-    "chmod -R 777 /", "chown -R",
-    "wget http", "curl http",
+    ":(){ :|:& };:",
 ];
 
-const DANGEROUS_RE = /(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)*\/\s*$|>\s*\/dev\/sd|mkfs\.|dd\s+if=|:\(\)\s*\{/i;
+const DANGEROUS_RE =
+    /(?:sudo\s+)?rm\s+(?:-\w*[rf]\w*\s+)*\/\s*$|>\s*['"]?\/dev\/sd|mkfs\.|dd\s+if=|:\(\)\s*\{/i;
 
 export function isDangerousCommand(command: string): boolean {
     if (DANGEROUS_RE.test(command)) return true;

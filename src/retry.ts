@@ -51,7 +51,10 @@ export class RetryPolicy {
         );
         this.baseDelayMs = options.baseDelayMs ?? 1_000;
         this.maxDelayMs = options.maxDelayMs ?? 30_000;
-        this.jitter = options.jitter ?? 0.25;
+        // Clamp jitter to [0, 1]: a caller passing 1.5 would otherwise
+        // let ``factor`` go negative and ``Math.max(0, factor)`` would
+        // produce zero-delay retry storms.
+        this.jitter = Math.min(1, Math.max(0, options.jitter ?? 0.25));
         this.perClassMax = options.perClassMax ?? {};
     }
 
@@ -59,7 +62,11 @@ export class RetryPolicy {
         return classifyError(err, provider);
     }
 
-    /** Return true if `attempt` (1-indexed) may be retried. */
+    /** Return true if `attempt` (1-indexed) may be retried.
+     *
+     * `maxRetries=N` means "perform up to N retries", so attempts 1..N
+     * are eligible (attempt N+1 is past the cap).
+     */
     shouldRetry(
         err: unknown,
         attempt: number,
@@ -68,7 +75,7 @@ export class RetryPolicy {
         const descriptor = options.descriptor ?? this.classify(err);
         if (!this.retryOn.has(descriptor.errorClass)) return false;
         const cap = this.perClassMax[descriptor.errorClass] ?? this.maxRetries;
-        return attempt < cap;
+        return attempt <= cap;
     }
 
     /** Return the milliseconds to sleep before retrying `attempt + 1`. */
