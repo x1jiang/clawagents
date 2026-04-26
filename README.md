@@ -1,18 +1,16 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.7.0**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.7.1**
 
-> **v6.7.0 (April 2026)** — Security hardening release. Closes a cluster of
-> bypasses across the bash validator, the obfuscation detector, the
-> `web_fetch` SSRF protection, the `edit_file` tool, the `redact()` scrubber,
-> and the Docker sandbox env policy. Highlights: DNS-rebinding TOCTOU
-> eliminated by IP-pinned HTTP(S) connections; HTTPS→HTTP redirect downgrades
-> refused; null-byte / control-character commands blocked; `bash -c '<cmd>'`,
-> `(rm -rf /)`, `$(rm -rf /)`, double-space, `$HOME`-shaped, `tee /dev/sda`,
-> `find -exec sh -c`, `chmod -R 777 /` all now `BLOCK`; PEM blocks,
-> `Authorization: Bearer …`, AWS secret keys, and URL basic-auth credentials
-> redacted. **511 TypeScript tests** pass (**5 new** regression tests),
-> `tsc --noEmit` clean; **835 Python tests** pass (**44 new**).
+> **v6.7.1 (April 2026)** — Tool discovery and compact-agent recovery release.
+> Compact tool-universe discovery is now registered by default, and lookup
+> scores tool names, descriptions, and keyword metadata so small models can
+> recover even when a tool name is imperfect. Failed native-tool observations
+> preserve structured output; `execute` returns command/exit/stdout/stderr
+> details on nonzero exits; repeated identical failures get a repair hint
+> instead of silently burning turns. This release keeps the v6.7.0 security
+> hardening and adds focused Python/TypeScript regression coverage for the new
+> recovery path.
 > See [Changelog](#changelog).
 
 ## Installation
@@ -859,6 +857,27 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.7.1 — Tool discovery and compact-agent recovery (April 2026)
+
+Patch release focused on generalizable low-latency tool use for compact
+models. `tool_discover` is registered by default so agents can inspect the
+available tool universe before committing to a call, and lookup now searches
+tool names, descriptions, and keyword metadata. That makes discovery robust
+when a model remembers the action it needs but not the exact tool name.
+
+Native-tool failures now keep useful output in the observation stream instead
+of reducing everything to a generic error. The built-in `execute` tool returns
+structured JSON for nonzero exits (`command`, `exit_code`, `stdout`,
+`stderr`, `output`, `timed_out`), and repeated identical `execute` failures
+include a recovery hint that nudges the agent to inspect the captured output
+or change command strategy.
+
+Planning/todo guidance was also tightened so quick read-only or single-step
+tasks do not pay unnecessary planning overhead, while multi-step repair tasks
+still get explicit progress tracking. Focused release verification covers
+TypeScript typecheck and infra-improvement regression tests, plus matching
+Python regression and bytecode checks.
+
 ### v6.7.0 — Security hardening across validator, web_fetch, redact, sandbox (April 2026)
 
 Minor release. Adversarial probing of the v6.6.4 surfaces uncovered a
@@ -1484,14 +1503,14 @@ await router.startAll({
 ```bash
 npm install
 
-# Run the full test suite (passes on v6.6.4)
+# Run the full test suite
 npm test
 
 # Hermetic runner — exactly the environment CI uses (pinned
 # --test-concurrency=4, TZ=UTC, NODE_ENV=test, credentials scrubbed)
 npm run test:hermetic
 
-# Type-check without emitting (clean, exit 0 on v6.6.4)
+# Type-check without emitting
 npm run typecheck
 
 # Build dist/ (runs typecheck under the hood)

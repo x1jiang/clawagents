@@ -1,6 +1,6 @@
 {
   "name": "clawagents",
-  "version": "6.7.0",
+  "version": "6.7.1",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
   "type": "module",
   "main": "./dist/index.js",

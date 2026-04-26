@@ -200,7 +200,8 @@ async function main(): Promise<void> {
         const errRL = new Error("429: rate limited");
         const descriptor = { errorClass: ErrorClass.PROVIDER_RATE_LIMIT, message: "rl", retryAfterMs: null } as any;
         assert(policy.shouldRetry(errRL, 1, { descriptor }), "rate-limit retryable on attempt 1");
-        assert(policy.shouldRetry(errRL, 2, { descriptor }) === false, "perClassMax=2 caps retries");
+        assert(policy.shouldRetry(errRL, 2, { descriptor }), "rate-limit retryable on attempt 2");
+        assert(policy.shouldRetry(errRL, 3, { descriptor }) === false, "perClassMax=2 caps retries");
 
         const authDesc = { errorClass: ErrorClass.PROVIDER_AUTH, message: "auth", retryAfterMs: null } as any;
         assert(policy.shouldRetry(new Error("401"), 1, { descriptor: authDesc }) === false, "auth errors not retried");
