@@ -1,6 +1,6 @@
 {
   "name": "clawagents",
-  "version": "6.6.0",
+  "version": "6.6.1",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,6 +13,66 @@
     "./cli": {
       "types": "./dist/cli.d.ts",
       "import": "./dist/cli.js"
+    },
+    "./acp": {
+      "types": "./dist/acp/index.d.ts",
+      "import": "./dist/acp/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    },
+    "./cron": {
+      "types": "./dist/cron/index.d.ts",
+      "import": "./dist/cron/index.js"
+    },
+    "./media": {
+      "types": "./dist/media/index.d.ts",
+      "import": "./dist/media/index.js"
+    },
+    "./media/*": {
+      "types": "./dist/media/*.d.ts",
+      "import": "./dist/media/*.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    },
+    "./permissions": {
+      "types": "./dist/permissions/index.d.ts",
+      "import": "./dist/permissions/index.js"
+    },
+    "./permissions/*": {
+      "types": "./dist/permissions/*.d.ts",
+      "import": "./dist/permissions/*.js"
+    },
+    "./rl": {
+      "types": "./dist/rl/index.d.ts",
+      "import": "./dist/rl/index.js"
+    },
+    "./settings": {
+      "types": "./dist/settings/index.d.ts",
+      "import": "./dist/settings/index.js"
+    },
+    "./settings/*": {
+      "types": "./dist/settings/*.d.ts",
+      "import": "./dist/settings/*.js"
+    },
+    "./testing/*": {
+      "types": "./dist/testing/*.d.ts",
+      "import": "./dist/testing/*.js"
+    },
+    "./tools/*": {
+      "types": "./dist/tools/*.d.ts",
+      "import": "./dist/tools/*.js"
+    },
+    "./tracing": {
+      "types": "./dist/tracing/index.d.ts",
+      "import": "./dist/tracing/index.js"
+    },
+    "./tracing/*": {
+      "types": "./dist/tracing/*.d.ts",
+      "import": "./dist/tracing/*.js"
     },
     "./package.json": "./package.json"
   },
@@ -34,7 +94,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/redact.test.ts src/commands.test.ts src/steer.test.ts src/paths.test.ts src/aux-models.test.ts src/transport.test.ts src/memory/compaction.test.ts src/background.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/subagent.test.ts src/tools/web.test.ts src/tools/ask-user-question.test.ts src/tools/exec-safety-v2.test.ts src/media/images.test.ts src/settings/resolver.test.ts src/testing/mock-provider.test.ts src/tracing/tracing.test.ts src/mcp/mcp.test.ts src/mcp/env-scrub.test.ts src/handoffs.test.ts src/browser/browser.test.ts src/cron/cron.test.ts src/acp/acp.test.ts src/rl/rl.test.ts tests/simulated.test.ts",
+    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/redact.test.ts src/commands.test.ts src/steer.test.ts src/paths.test.ts src/aux-models.test.ts src/transport.test.ts src/memory/compaction.test.ts src/background.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/subagent.test.ts src/tools/web.test.ts src/tools/ask-user-question.test.ts src/tools/exec-safety-v2.test.ts src/media/images.test.ts src/settings/resolver.test.ts src/testing/mock-provider.test.ts src/tracing/tracing.test.ts src/mcp/mcp.test.ts src/mcp/env-scrub.test.ts src/sandbox/credential-proxy.test.ts src/gateway/gateway.test.ts src/handoffs.test.ts src/browser/browser.test.ts src/cron/cron.test.ts src/acp/acp.test.ts src/rl/rl.test.ts tests/simulated.test.ts",
     "test:hermetic": "bash scripts/run_tests.sh",
     "test:surfaces": "tsx tests/openai_agents_surfaces.test.ts",
     "test:all": "npm run test && npm run test:surfaces",

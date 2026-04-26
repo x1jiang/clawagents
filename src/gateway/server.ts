@@ -50,11 +50,19 @@ function resolveBindHost(host?: string): string {
 }
 
 export async function startGateway(port: number = 3000, host?: string) {
+    const bindHost = resolveBindHost(host);
+    const gatewayApiKey = process.env["GATEWAY_API_KEY"] ?? "";
+    const isLoopback = LOOPBACK_HOSTS.has(bindHost);
+    if (!isLoopback && !gatewayApiKey) {
+        throw new Error(
+            "Refusing to start unauthenticated gateway on non-loopback host. " +
+            "Set GATEWAY_API_KEY or bind to 127.0.0.1.",
+        );
+    }
+
     const config = loadConfig();
     const activeModel = getDefaultModel(config);
     const llm = await createProvider(activeModel, config);
-    const gatewayApiKey = process.env["GATEWAY_API_KEY"] ?? "";
-    const bindHost = resolveBindHost(host);
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
         try {
@@ -76,7 +84,6 @@ export async function startGateway(port: number = 3000, host?: string) {
         : "none (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)";
 
     server.listen(port, bindHost, async () => {
-        const isLoopback = LOOPBACK_HOSTS.has(bindHost);
         const displayHost = isLoopback ? "localhost" : bindHost;
         console.log(`\n🦞 ClawAgents Gateway running on http://${displayHost}:${port}`);
         console.log(`   Provider: ${llm.name}`);
@@ -86,19 +93,7 @@ export async function startGateway(port: number = 3000, host?: string) {
         console.log(`   Endpoints: POST /chat | POST /chat/stream | WS /ws | GET /queue | GET /health`);
         console.log(`   Channels: ${channelDesc}`);
 
-        if (!isLoopback && !gatewayApiKey) {
-            console.warn(
-                "\n⚠️  WARNING: gateway is bound to a non-loopback address with auth disabled.",
-            );
-            console.warn(
-                "   This exposes /chat, /chat/stream, and /ws to anyone who can reach this host.",
-            );
-            console.warn(
-                "   Set GATEWAY_API_KEY=<secret> to require Bearer auth, or unset GATEWAY_HOST to bind to 127.0.0.1.\n",
-            );
-        } else {
-            console.log("");
-        }
+        console.log("");
 
         if (detectedChannels.length > 0) {
             try {

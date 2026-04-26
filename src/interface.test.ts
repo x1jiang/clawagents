@@ -13,7 +13,12 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ToolRegistry, type Tool, type ToolResult } from "./tools/registry.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Minimal ClawAgent mock — import the real class
 // We can't import the full agent.ts because it has side-effect imports,
@@ -332,6 +337,52 @@ describe("lazy tool provisioning", () => {
         assert.ok(toolNames.includes("execute"));
         assert.ok(toolNames.includes("ls"));
         assert.ok(toolNames.includes("grep"));
+    });
+
+    it("createClawAgent lazy schemas match backing tools", async () => {
+        const { createClawAgent } = await import("./agent.js");
+        const { LocalBackend } = await import("./sandbox/local.js");
+        const { createFilesystemTools } = await import("./tools/filesystem.js");
+        const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
+        const agent = await createClawAgent({ model: "gpt-5-nano" });
+        const lazyByName = new Map(agent.tools.list().map((tool: Tool) => [tool.name, tool]));
+        const backend = new LocalBackend();
+        const realByName = new Map([
+            ...createFilesystemTools(backend),
+            ...createAdvancedFsTools(backend),
+        ].map((tool: Tool) => [tool.name, tool]));
+
+        for (const name of ["edit_file", "grep", "tree"]) {
+            assert.deepEqual(lazyByName.get(name)?.parameters, realByName.get(name)?.parameters);
+        }
+    });
+});
+
+describe("package contract", () => {
+    it("exports documented public subpaths", () => {
+        const pkg = JSON.parse(
+            readFileSync(resolve(__dirname, "../package.json"), "utf8"),
+        ) as { exports: Record<string, unknown> };
+
+        for (const subpath of [
+            "./acp",
+            "./browser",
+            "./cron",
+            "./media",
+            "./media/*",
+            "./mcp",
+            "./permissions",
+            "./permissions/*",
+            "./rl",
+            "./settings",
+            "./settings/*",
+            "./testing/*",
+            "./tools/*",
+            "./tracing",
+            "./tracing/*",
+        ]) {
+            assert.ok(pkg.exports[subpath], `${subpath} is exported`);
+        }
     });
 });
 

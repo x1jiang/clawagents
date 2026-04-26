@@ -46,6 +46,7 @@ export const WRITE_CLASS_TOOLS: ReadonlySet<string> = new Set([
     "exec",
     "bash",
     // Composite / sub-agent tools that may issue writes.
+    "task",
     "subagent",
     "compose",
 ]);

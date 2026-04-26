@@ -196,6 +196,7 @@ function makeFakeReadTool(): Tool {
 test("isWriteClassTool — known names", () => {
     assert.equal(isWriteClassTool("write_file"), true);
     assert.equal(isWriteClassTool("execute"), true);
+    assert.equal(isWriteClassTool("task"), true);
     assert.equal(isWriteClassTool("subagent"), true);
     assert.equal(isWriteClassTool("read_file"), false);
     assert.equal(isWriteClassTool("ls"), false);
@@ -217,6 +218,24 @@ test("plan mode — registry blocks write-class tools", async () => {
 
     r = await reg.executeTool("read_file", {}, ctx);
     assert.equal(r.success, true);
+});
+
+test("plan mode — registry blocks task delegation tool", async () => {
+    const reg = new ToolRegistry();
+    reg.register({
+        name: "task",
+        description: "delegate",
+        parameters: { task: { type: "string", description: "task", required: true } },
+        async execute() {
+            return { success: true, output: "spawned" };
+        },
+    });
+    const ctx = new RunContext();
+    ctx.permissionMode = PermissionMode.PLAN;
+
+    const r = await reg.executeTool("task", { task: "write something" }, ctx);
+    assert.equal(r.success, false);
+    assert.match(String(r.error ?? ""), /plan mode/i);
 });
 
 test("enter / exit plan mode round trip", async () => {

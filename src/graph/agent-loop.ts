@@ -2267,9 +2267,12 @@ export async function runAgentGraph<TContext = unknown>(
 
             } else {
                 let approvedCalls = toolCalls;
+                let approvedOrigIndices = toolCalls.map((_, idx) => idx);
                 if (beforeTool) {
                     const remapped: import("../tools/registry.js").ParsedToolCall[] = [];
-                    for (const call of toolCalls) {
+                    const remappedOrigIndices: number[] = [];
+                    for (let idx = 0; idx < toolCalls.length; idx++) {
+                        const call = toolCalls[idx]!;
                         let approved = true;
                         let remappedCall = call;
                         try {
@@ -2285,53 +2288,60 @@ export async function runAgentGraph<TContext = unknown>(
                             }
                         } catch (hookErr) { emit("warn", { message: `beforeTool hook error: ${hookErr}` }); }
                         if (!approved) emit("tool_skipped", { name: call.toolName });
-                        else { emit("tool_call", { name: call.toolName }); remapped.push(remappedCall); }
+                        else {
+                            remapped.push(remappedCall);
+                            remappedOrigIndices.push(idx);
+                        }
                     }
                     approvedCalls = remapped;
-                } else {
-                    for (const call of toolCalls) {
-                        emit("tool_call", { name: call.toolName });
-                    }
+                    approvedOrigIndices = remappedOrigIndices;
                 }
 
                 // ── Per-call approval (sticky via RunContext) — parallel ─────
-                if (approvalHandler) {
-                    const gated: import("../tools/registry.js").ParsedToolCall[] = [];
-                    for (let idx = 0; idx < approvedCalls.length; idx++) {
-                        const call = approvedCalls[idx]!;
-                        const ntc = nativeToolCallObjects[idx];
-                        const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${call.toolName}`;
-                        let approved = runContext.isToolApproved(callId, { toolName: call.toolName });
-                        if (approved === undefined) {
-                            try {
-                                const record = await approvalHandler({
-                                    toolName: call.toolName,
-                                    toolCallId: callId,
-                                    args: call.args,
-                                    runContext: runContext as RunContext<unknown>,
-                                });
-                                if (record) {
-                                    if (record.approved) runContext.approveTool(callId, { always: record.always, toolName: call.toolName });
-                                    else runContext.rejectTool(callId, { always: record.always, toolName: call.toolName, reason: record.reason });
-                                    approved = record.approved;
-                                }
-                            } catch (apprErr) { emit("warn", { message: `approvalHandler error: ${apprErr}` }); }
-                        }
-                        if (approved === false) {
-                            const reason = runContext.getApproval(callId, { toolName: call.toolName })?.reason ?? "approval not granted";
-                            emit("tool_skipped", { name: call.toolName, reason });
-                            messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was not approved. Reason: ${reason}` });
-                            continue;
-                        }
-                        if (approved === undefined) {
-                            emit("approval_required", { name: call.toolName, callId, args: call.args });
-                            messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} requires approval but none was granted.` });
-                            continue;
-                        }
-                        gated.push(call);
+                const gatedCalls: import("../tools/registry.js").ParsedToolCall[] = [];
+                const gatedOrigIndices: number[] = [];
+                const approvedCallIds: string[] = [];
+                for (let idx = 0; idx < approvedCalls.length; idx++) {
+                    const call = approvedCalls[idx]!;
+                    const origIdx = approvedOrigIndices[idx] ?? idx;
+                    const ntc = nativeToolCallObjects[origIdx];
+                    const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${origIdx}-${call.toolName}`;
+                    let approved = runContext.isToolApproved(callId, { toolName: call.toolName });
+                    if (approved === undefined && approvalHandler) {
+                        try {
+                            const record = await approvalHandler({
+                                toolName: call.toolName,
+                                toolCallId: callId,
+                                args: call.args,
+                                runContext: runContext as RunContext<unknown>,
+                            });
+                            if (record) {
+                                if (record.approved) runContext.approveTool(callId, { always: record.always, toolName: call.toolName });
+                                else runContext.rejectTool(callId, { always: record.always, toolName: call.toolName, reason: record.reason });
+                                approved = record.approved;
+                            }
+                        } catch (apprErr) { emit("warn", { message: `approvalHandler error: ${apprErr}` }); }
                     }
-                    approvedCalls = gated;
+                    if (approved === undefined && !approvalHandler) {
+                        approved = true;
+                    }
+                    if (approved === false) {
+                        const reason = runContext.getApproval(callId, { toolName: call.toolName })?.reason ?? "approval not granted";
+                        emit("tool_skipped", { name: call.toolName, reason });
+                        messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} was not approved. Reason: ${reason}` });
+                        continue;
+                    }
+                    if (approved === undefined) {
+                        emit("approval_required", { name: call.toolName, callId, args: call.args });
+                        messages.push({ role: "user", content: `[Tool Skipped] ${call.toolName} requires approval but none was granted.` });
+                        continue;
+                    }
+                    gatedCalls.push(call);
+                    gatedOrigIndices.push(origIdx);
+                    approvedCallIds.push(callId);
                 }
+                approvedCalls = gatedCalls;
+                approvedOrigIndices = gatedOrigIndices;
 
                 if (approvedCalls.length === 0) {
                     messages.push({ role: "user", content: "[All tools were rejected by approval hook]" });
@@ -2343,18 +2353,14 @@ export async function runAgentGraph<TContext = unknown>(
                 // onToolStart for each approved call
                 for (let idx = 0; idx < approvedCalls.length; idx++) {
                     const call = approvedCalls[idx]!;
-                    const ntc = nativeToolCallObjects[idx];
-                    const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${call.toolName}`;
+                    const callId = approvedCallIds[idx]!;
+                    emit("tool_call", { name: call.toolName });
                     await fireHook("onToolStart", { toolName: call.toolName, args: call.args, toolCallId: callId });
                     emit("tool_started", { name: call.toolName, callId, args: call.args });
                 }
 
                 // Heartbeat across the parallel batch; ``call_ids`` lets
                 // listeners disambiguate which group is currently in flight.
-                const _approvedCallIds = approvedCalls.map((c, idx) => {
-                    const ntc = nativeToolCallObjects[idx];
-                    return ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${c.toolName}`;
-                });
                 const results = await runWithHeartbeat(
                     registry!.executeToolsParallel(
                         approvedCalls,
@@ -2366,7 +2372,7 @@ export async function runAgentGraph<TContext = unknown>(
                         payload: {
                             parallel: true,
                             tool_names: approvedCalls.map((c) => c.toolName),
-                            call_ids: _approvedCallIds,
+                            call_ids: approvedCallIds,
                         },
                         intervalMs: DEFAULT_ACTIVITY_HEARTBEAT_INTERVAL_MS,
                     },
@@ -2376,8 +2382,7 @@ export async function runAgentGraph<TContext = unknown>(
                 // onToolEnd for each approved call
                 for (let idx = 0; idx < approvedCalls.length; idx++) {
                     const call = approvedCalls[idx]!;
-                    const ntc = nativeToolCallObjects[idx];
-                    const callId = ntc?.toolCallId || `synthetic-${roundIdx}-${idx}-${call.toolName}`;
+                    const callId = approvedCallIds[idx]!;
                     await fireHook("onToolEnd", { toolName: call.toolName, args: call.args, result: results[idx], toolCallId: callId });
                 }
 
@@ -2468,20 +2473,8 @@ export async function runAgentGraph<TContext = unknown>(
 
                 // Use proper tool role messages when native tools are enabled
                 if (useNativeTools && nativeToolCallObjects.length > 0) {
-                    // Build mapping: approved call index -> native tool call object
-                    // (handles filtered parallel calls where approvedCalls is a subset of toolCalls)
-                    const nativeTcMap: Record<number, typeof nativeToolCallObjects[number]> = {};
-                    let approvedIdx = 0;
-                    for (let i = 0; i < toolCalls.length && approvedIdx < approvedCalls.length; i++) {
-                        if (toolCalls[i] === approvedCalls[approvedIdx]) {
-                            if (i < nativeToolCallObjects.length) {
-                                nativeTcMap[approvedIdx] = nativeToolCallObjects[i]!;
-                            }
-                            approvedIdx++;
-                        }
-                    }
                     const tcMeta = approvedCalls.map((call, idx) => {
-                        const ntc = nativeTcMap[idx];
+                        const ntc = nativeToolCallObjects[approvedOrigIndices[idx] ?? idx];
                         return { id: ntc?.toolCallId || `fallback_${idx}`, name: call.toolName, args: call.args };
                     });
                     messages.push({
@@ -2492,7 +2485,7 @@ export async function runAgentGraph<TContext = unknown>(
                         thinking: _thinkingContent,
                     });
                     for (let idx = 0; idx < approvedCalls.length; idx++) {
-                        const ntc = nativeTcMap[idx];
+                        const ntc = nativeToolCallObjects[approvedOrigIndices[idx] ?? idx];
                         messages.push({
                             role: "tool",
                             content: toolOutputs[idx] ?? "",

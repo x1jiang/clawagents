@@ -6,6 +6,9 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { runAgentGraph } from "../graph/agent-loop.js";
+import type { LLMMessage, LLMProvider, LLMResponse } from "../providers/llm.js";
+import { RunContext } from "../run-context.js";
 import { ToolRegistry, type Tool, type ToolResult, type ParsedToolCall } from "./registry.js";
 
 // ─── Mock tools ──────────────────────────────────────────────────────────
@@ -21,6 +24,19 @@ function makeTool(name: string, delayMs = 0, fail = false): Tool {
             return { success: true, output: `${name}:${JSON.stringify(args)}` };
         },
     };
+}
+
+class NativeMockLLM implements LLMProvider {
+    name = "mock-native";
+    private responses: LLMResponse[];
+
+    constructor(responses: LLMResponse[]) {
+        this.responses = [...responses];
+    }
+
+    async chat(_messages: LLMMessage[]): Promise<LLMResponse> {
+        return this.responses.shift() ?? { content: "done", model: "mock", tokensUsed: 1 };
+    }
 }
 
 // ─── Multi-fenced-block parsing ─────────────────────────────────────────
@@ -151,5 +167,105 @@ describe("Full parallel execution flow", () => {
         assert.equal(results.length, 3);
         assert.ok(results.every((r) => r.success));
         assert.ok(elapsed < 60, `Should be parallel but took ${elapsed}ms`);
+    });
+
+    it("honors sticky RunContext rejection for native parallel calls", async () => {
+        const calls: Record<string, unknown>[][] = [[], []];
+        const registry = new ToolRegistry();
+        registry.register({
+            name: "alpha",
+            description: "alpha",
+            parameters: {},
+            async execute(args) {
+                calls[0]!.push(args);
+                return { success: true, output: "alpha" };
+            },
+        });
+        registry.register({
+            name: "beta",
+            description: "beta",
+            parameters: {},
+            async execute(args) {
+                calls[1]!.push(args);
+                return { success: true, output: "beta" };
+            },
+        });
+        const llm = new NativeMockLLM([
+            {
+                content: "",
+                model: "mock",
+                tokensUsed: 1,
+                toolCalls: [
+                    { toolName: "alpha", args: { x: "1" }, toolCallId: "id_a" },
+                    { toolName: "beta", args: { x: "2" }, toolCallId: "id_b" },
+                ],
+            },
+            { content: "done", model: "mock", tokensUsed: 1 },
+        ]);
+        const ctx = new RunContext();
+        ctx.rejectTool("id_b", { toolName: "beta", reason: "blocked beta" });
+
+        await runAgentGraph(
+            "task",
+            llm,
+            registry,
+            undefined,
+            3,
+            false,
+            128000,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            true,
+            false,
+            false,
+            false,
+            120,
+            500,
+            0,
+            undefined,
+            undefined,
+            3,
+            { runContext: ctx },
+        );
+
+        assert.deepEqual(calls[0], [{ x: "1" }]);
+        assert.deepEqual(calls[1], []);
+    });
+
+    it("keeps native call ids aligned after beforeTool filters calls", async () => {
+        const events: Array<{ kind: string; data: Record<string, unknown> }> = [];
+        const registry = new ToolRegistry();
+        registry.register(makeTool("alpha"));
+        registry.register(makeTool("beta"));
+        const llm = new NativeMockLLM([
+            {
+                content: "",
+                model: "mock",
+                tokensUsed: 1,
+                toolCalls: [
+                    { toolName: "alpha", args: { x: "1" }, toolCallId: "id_a" },
+                    { toolName: "beta", args: { x: "2" }, toolCallId: "id_b" },
+                ],
+            },
+            { content: "done", model: "mock", tokensUsed: 1 },
+        ]);
+
+        await runAgentGraph(
+            "task",
+            llm,
+            registry,
+            undefined,
+            3,
+            false,
+            128000,
+            (kind, data) => events.push({ kind, data: data as Record<string, unknown> }),
+            undefined,
+            (name) => name !== "alpha",
+        );
+
+        const start = events.find((event) => event.kind === "tool_started");
+        assert.equal(start?.data.callId, "id_b");
     });
 });

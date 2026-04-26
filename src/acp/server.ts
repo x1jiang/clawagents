@@ -132,10 +132,11 @@ export const defaultRunner: PromptRunner = async (
                 ? (agent.arun as
                       | ((text: string) => unknown)
                       | undefined) ??
-                  (agent.run as ((text: string) => unknown) | undefined)
+                  (agent.run as ((text: string) => unknown) | undefined) ??
+                  (agent.invoke as ((text: string) => unknown) | undefined)
                 : undefined;
         if (!runFn) {
-            throw new Error("agent has no run() / arun() method");
+            throw new Error("agent has no run() / arun() / invoke() method");
         }
 
         const result = runFn.call(agent, prompt.text);
@@ -147,12 +148,17 @@ export const defaultRunner: PromptRunner = async (
         close();
         await drainPromise;
 
+        const outputText =
+            typeof output === "string"
+                ? output
+                : output && typeof output === "object" && "result" in output
+                    ? String((output as { result?: unknown }).result ?? "")
+                    : "";
         if (
             session.emitted.length === 0 &&
-            typeof output === "string" &&
-            output.length > 0
+            outputText.length > 0
         ) {
-            await session.adispatch("message_text", { text: output });
+            await session.adispatch("message_text", { text: outputText });
         }
         return session.stopReason ?? StopReasonValues.END_TURN;
     } catch (exc) {

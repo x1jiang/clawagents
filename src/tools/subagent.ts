@@ -153,7 +153,7 @@ export class TaskTool implements Tool {
 
                 if (Object.keys(credHeaders).length > 0) {
                     proxy = new CredentialProxy(credHeaders);
-                    const proxyUrl = proxy.start();
+                    const proxyUrl = await proxy.start();
                     const overrides: Record<string, string> = {
                         OPENAI_BASE_URL: proxyUrl,
                         ANTHROPIC_BASE_URL: proxyUrl,

@@ -370,6 +370,44 @@ test("Server runPrompt falls back to final message", async () => {
     assert.equal((sink[0].content as Record<string, unknown>).text, "echo: say hi");
 });
 
+test("Server runPrompt supports invoke-only agents", async () => {
+    class InvokeOnlyAgent {
+        onEvent?: (kind: string, payload?: Record<string, unknown>) => void;
+        async invoke(prompt: string): Promise<string> {
+            return `invoke: ${prompt}`;
+        }
+    }
+    const server = new AcpServer({ agent: new InvokeOnlyAgent() });
+    const sink: Record<string, unknown>[] = [];
+    const stop = await server.runPrompt(
+        { sessionId: "s-invoke", text: "hello", blocks: [] },
+        async (raw) => {
+            sink.push(raw);
+        }
+    );
+    assert.equal(stop, StopReasonValues.END_TURN);
+    assert.equal(sink.length, 1);
+    assert.equal((sink[0].content as Record<string, unknown>).text, "invoke: hello");
+});
+
+test("Server runPrompt unwraps AgentState result", async () => {
+    class AgentStateLike {
+        onEvent?: (kind: string, payload?: Record<string, unknown>) => void;
+        async invoke(_prompt: string): Promise<{ result: string }> {
+            return { result: "state result" };
+        }
+    }
+    const server = new AcpServer({ agent: new AgentStateLike() });
+    const sink: Record<string, unknown>[] = [];
+    await server.runPrompt(
+        { sessionId: "s-state", text: "hello", blocks: [] },
+        async (raw) => {
+            sink.push(raw);
+        }
+    );
+    assert.equal((sink[0].content as Record<string, unknown>).text, "state result");
+});
+
 test("Server runPrompt reports runner error", async () => {
     class BoomAgent {
         onEvent?: (kind: string, payload?: Record<string, unknown>) => void;

@@ -516,8 +516,8 @@ export async function createClawAgent({
         { name: "ls", description: "List directory contents with size and modification time", parameters: { path: { type: "string", description: "Directory path (default: cwd)" } } },
         { name: "read_file", description: "Read a file with line numbers and optional pagination", parameters: { path: { type: "string", description: "File path to read", required: true }, offset: { type: "number", description: "Start line (0-based)" }, limit: { type: "number", description: "Max lines to return" } } },
         { name: "write_file", description: "Write content to a file (creates dirs automatically)", parameters: { path: { type: "string", description: "File path", required: true }, content: { type: "string", description: "Content to write", required: true } } },
-        { name: "edit_file", description: "Replace text in a file", parameters: { path: { type: "string", description: "File path", required: true }, old_text: { type: "string", description: "Text to find", required: true }, new_text: { type: "string", description: "Replacement", required: true }, replace_all: { type: "string", description: "Replace all occurrences (true/false)" } } },
-        { name: "grep", description: "Search for text/regex in files", parameters: { pattern: { type: "string", description: "Search pattern (regex)", required: true }, path: { type: "string", description: "File or directory to search" }, include: { type: "string", description: "Glob filter (e.g. *.ts)" } } },
+        { name: "edit_file", description: "Replace text in a file", parameters: { path: { type: "string", description: "Path to the file to edit", required: true }, target: { type: "string", description: "The exact block of text to replace", required: true }, replacement: { type: "string", description: "The new text", required: true }, replace_all: { type: "boolean", description: "Replace all occurrences (default: false, requires unique match)" } } },
+        { name: "grep", description: "Search for text/regex in files", parameters: { path: { type: "string", description: "File or directory to search", required: true }, pattern: { type: "string", description: "Text pattern to search for", required: true }, glob_filter: { type: "string", description: "Glob pattern to filter files (e.g., '*.ts'). Only for directories." }, recursive: { type: "boolean", description: "Search recursively in subdirectories. Default: false" } } },
         { name: "glob", description: "Find files matching a glob pattern", parameters: { pattern: { type: "string", description: "Glob pattern (e.g. **/*.ts)", required: true }, path: { type: "string", description: "Base directory" } } },
     ];
     for (const schema of lazyFilesystemTools) {
@@ -535,7 +535,7 @@ export async function createClawAgent({
     ));
 
     const lazyAdvancedFsTools: Array<{ name: string; description: string; parameters: any }> = [
-        { name: "tree", description: "Show recursive directory tree", parameters: { path: { type: "string", description: "Root directory" }, depth: { type: "number", description: "Max depth" } } },
+        { name: "tree", description: "Show recursive directory tree", parameters: { path: { type: "string", description: "Root directory. Default: current directory" }, max_depth: { type: "number", description: "Max depth to recurse. Default: 4" } } },
         { name: "diff", description: "Unified diff between two files", parameters: { file_a: { type: "string", description: "First file", required: true }, file_b: { type: "string", description: "Second file", required: true } } },
         { name: "insert_lines", description: "Insert text at a specific line number", parameters: { path: { type: "string", description: "File path", required: true }, line: { type: "number", description: "Line number", required: true }, content: { type: "string", description: "Content to insert", required: true } } },
     ];

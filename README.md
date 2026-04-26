@@ -1,20 +1,14 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.0**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.1**
 
-> **v6.6.0 (April 2026)** — Hermes-parity feature release. Native **browser
-> tools** (Playwright local + cloud provider stubs, accessibility-tree
-> snapshots, surgical `click`/`type`/`fillForm`/`navigate`/`scroll`/
-> `waitForSelector` action set), built-in **cron / scheduler** (interval,
-> one-shot, and cron expressions, JSON-persisted job store, `runDue` driver
-> with structured `JobNotifier` events), **ACP adapter** (`AcpServer.serve()`
-> bridges any ClawAgents agent to Zed's Agent Client Protocol over stdio
-> with per-session prompt runners), and **RL fine-tuning hooks** (`RLRecorder`
-> + `Trajectory` data model, pluggable `RewardScorer`s, `TrlAdapter` /
-> `AtroposAdapter` exporters with TRL-SFT / TRL-DPO / Atropos rollout /
-> generic JSONL output). All four ports landed on **both** TypeScript and
-> Python with mirrored APIs. **478 tests** pass, `tsc --noEmit` clean. See
-> [Changelog](#changelog).
+> **v6.6.1 (April 2026)** — Patch/security hardening for the Hermes-parity
+> line. Parallel native tools now honor sticky approvals, the credential proxy
+> supports SDK base-URL mode without cross-origin credential injection, the
+> gateway refuses non-loopback unauthenticated startup, lazy schemas match the
+> real tool implementations, ACP accepts `ClawAgent.invoke()` agents, and the
+> package exports now include the documented subpaths. **489 tests** pass,
+> `tsc --noEmit` clean. See [Changelog](#changelog).
 
 ## Installation
 
@@ -858,6 +852,32 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
+### v6.6.1 — Approval, proxy, gateway, ACP, exports, and release hardening (April 2026)
+
+Patch/security release for the v6.6 line. Test totals after this release:
+**TypeScript 489 passed, 4 skipped**; **surface parity 49 passed**;
+**Python 769 passed, 3 skipped**; `tsc --noEmit` clean, mypy clean.
+
+- **Parallel tool approvals** — batched/native tool execution now honors
+  sticky `RunContext` approvals and denials, and native tool-call IDs remain
+  stable after filtering or remapping.
+- **Credential proxy SDK mode** — provider SDK path requests such as
+  `/v1/models` now resolve through the configured upstream, HTTPS upstreams
+  use the right transport, and credential injection is restricted to allowed
+  origins with downgrade/cross-origin redirects rejected.
+- **Gateway fail-closed auth** — non-loopback gateway startup now refuses to
+  listen without `GATEWAY_API_KEY`, matching the documented security policy.
+- **Lazy tool schema parity** — factory-published schemas now match the
+  implementation arguments for `edit_file`, `grep`, and `tree`
+  (`target` / `replacement`, `glob_filter`, `max_depth`).
+- **ACP default runner parity** — `AcpServer.serve(createClawAgent(...))` now
+  accepts real ClawAgents instances via `invoke()` and normalizes
+  `AgentState.result` into protocol messages.
+- **Package and runner polish** — documented public subpaths are exported,
+  `CLAW_TEST_WORKERS` is preserved by the hermetic runner, package-driven test
+  discovery covers the feature suites, and plan mode gates the real `task`
+  delegation tool.
+
 ### v6.6.0 — Hermes-parity feature release: browser tools, scheduler, ACP, RL hooks (April 2026)
 
 Feature release. Four big Hermes-side capabilities now ship on both
@@ -955,7 +975,7 @@ passed**, **Python 662 passed**, `tsc --noEmit` clean, mypy clean.
 
 **Tier 3 — testing infrastructure:**
 
-- **🧪 Hermetic test runner + pinned concurrency** (`scripts/run_tests.sh`, `package.json`) — canonical CI-mirrored runner that pins `tsx --test --test-concurrency=4` (override via `CLAW_TEST_WORKERS`), forces `TZ=UTC` / `LANG=C.UTF-8` / `NODE_ENV=test`, and scrubs every credential + `CLAW_*` env var before `node:test` sees it. Available via `npm run test:hermetic`. Mirrored by `clawagents_py/scripts/run_tests.sh` for the Python port (`pytest -n 4` via `pytest-xdist`).
+- **🧪 Hermetic test runner + pinned concurrency** (`scripts/run_tests.sh`, `package.json`) — canonical CI-mirrored runner that pins `tsx --test --test-concurrency=4` (override via `CLAW_TEST_WORKERS`), forces `TZ=UTC` / `LANG=C.UTF-8` / `NODE_ENV=test`, and scrubs credentials plus non-runner `CLAW_*` env vars before `node:test` sees them. Available via `npm run test:hermetic`. Mirrored by `clawagents_py/scripts/run_tests.sh` for the Python port (`pytest -n 4` via `pytest-xdist`).
 
 **Backwards compatibility:** All 10 features are additive. Existing
 `createClawAgent()` / `agent.invoke()` call sites keep working; the new
@@ -1357,14 +1377,14 @@ await router.startAll({
 ```bash
 npm install
 
-# Run the full test suite (passes on v6.6.0)
+# Run the full test suite (passes on v6.6.1)
 npm test
 
 # Hermetic runner — exactly the environment CI uses (pinned
 # --test-concurrency=4, TZ=UTC, NODE_ENV=test, credentials scrubbed)
 npm run test:hermetic
 
-# Type-check without emitting (clean, exit 0 on v6.6.0)
+# Type-check without emitting (clean, exit 0 on v6.6.1)
 npm run typecheck
 
 # Build dist/ (runs typecheck under the hood)

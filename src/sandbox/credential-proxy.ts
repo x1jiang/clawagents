@@ -6,39 +6,88 @@
  *
  * Usage:
  *   const proxy = new CredentialProxy({ "Authorization": "Bearer sk-..." });
- *   const url = proxy.start();   // e.g. "http://127.0.0.1:54321"
+ *   const url = await proxy.start();   // e.g. "http://127.0.0.1:54321"
  *   // point sub-agent at url, strip real keys from its env
  *   proxy.stop();
  *
- * Uses only Node.js stdlib (http) — no extra dependencies.
+ * Uses only Node.js stdlib (http/https) — no extra dependencies.
  */
 
 import * as http from "node:http";
+import * as https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const HOP_BY_HOP = new Set([
     "host", "content-length", "transfer-encoding", "connection",
 ]);
 
+const DEFAULT_UPSTREAM_BASE_URLS: Record<string, string> = {
+    openai: "https://api.openai.com/v1",
+    anthropic: "https://api.anthropic.com",
+};
+
+function providerForRequest(req: IncomingMessage): string {
+    if (req.headers["anthropic-version"] || req.headers["x-api-key"]) {
+        return "anthropic";
+    }
+    return "openai";
+}
+
+function resolveTargetUrl(req: IncomingMessage, upstreamBaseUrls: Record<string, string>): URL {
+    const rawUrl = req.url ?? "/";
+    const parsed = new URL(rawUrl, "http://proxy.local");
+    if (parsed.protocol !== "http:" || parsed.hostname !== "proxy.local") {
+        return new URL(rawUrl);
+    }
+
+    const provider = providerForRequest(req);
+    const base = new URL(upstreamBaseUrls[provider] ?? DEFAULT_UPSTREAM_BASE_URLS[provider]!);
+    const requestedPath = parsed.pathname.startsWith("/") ? parsed.pathname : `/${parsed.pathname}`;
+    const basePath = base.pathname.replace(/\/$/, "");
+    const path = basePath && requestedPath.startsWith(`${basePath}/`)
+        ? requestedPath
+        : `${basePath}/${requestedPath.replace(/^\//, "")}`.replace(/\/{2,}/g, "/");
+    return new URL(`${path}${parsed.search}`, base);
+}
+
+function allowedOrigins(upstreamBaseUrls: Record<string, string>): Set<string> {
+    return new Set(Object.values(upstreamBaseUrls).map((url) => {
+        const parsed = new URL(url);
+        return `${parsed.protocol}//${parsed.host}`;
+    }));
+}
+
+function credentialAppliesToTarget(headerName: string, target: URL): boolean {
+    const lower = headerName.toLowerCase();
+    if (target.hostname.includes("anthropic")) return lower === "x-api-key";
+    if (target.hostname.includes("openai")) return lower === "authorization";
+    return true;
+}
+
 function forwardRequest(
     req: IncomingMessage,
     res: ServerResponse,
     credentials: Record<string, string>,
+    upstreamBaseUrls: Record<string, string>,
     body?: Buffer,
 ): void {
-    const targetUrl = req.url ?? "/";
     let parsed: URL;
     try {
-        parsed = new URL(targetUrl);
+        parsed = resolveTargetUrl(req, upstreamBaseUrls);
     } catch {
         res.writeHead(400, { "Content-Type": "text/plain" });
         res.end("Bad Request: invalid URL");
         return;
     }
+    if (!allowedOrigins(upstreamBaseUrls).has(`${parsed.protocol}//${parsed.host}`)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Forbidden: refusing to proxy untrusted upstream");
+        return;
+    }
 
     const options: http.RequestOptions = {
         hostname: parsed.hostname,
-        port: parsed.port || 80,
+        port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
         path: parsed.pathname + parsed.search,
         method: req.method,
         headers: {},
@@ -53,14 +102,17 @@ function forwardRequest(
 
     // Inject credentials
     for (const [name, value] of Object.entries(credentials)) {
-        (options.headers as Record<string, string>)[name] = value;
+        if (credentialAppliesToTarget(name, parsed)) {
+            (options.headers as Record<string, string>)[name] = value;
+        }
     }
 
     if (body && body.length > 0) {
         (options.headers as Record<string, string>)["content-length"] = String(body.length);
     }
 
-    const proxyReq = http.request(options, (proxyRes) => {
+    const transport = parsed.protocol === "https:" ? https : http;
+    const proxyReq = transport.request(options, (proxyRes) => {
         const statusCode = proxyRes.statusCode ?? 502;
         const responseHeaders: Record<string, string | string[]> = {};
         for (const [key, value] of Object.entries(proxyRes.headers)) {
@@ -99,6 +151,7 @@ export class CredentialProxy {
     private _credentials: Record<string, string>;
     private _host: string;
     private _port: number;
+    private _upstreamBaseUrls: Record<string, string>;
     private _server: http.Server | null = null;
     private _url: string | null = null;
 
@@ -106,29 +159,32 @@ export class CredentialProxy {
         credentials: Record<string, string>,
         host = "127.0.0.1",
         port = 0,
+        upstreamBaseUrls: Record<string, string> = DEFAULT_UPSTREAM_BASE_URLS,
     ) {
         this._credentials = { ...credentials };
         this._host = host;
         this._port = port;
+        this._upstreamBaseUrls = { ...upstreamBaseUrls };
     }
 
     /**
      * Start the proxy and return its base URL (e.g. `"http://127.0.0.1:54321"`).
      * The proxy runs in the background. Call `stop()` for clean shutdown.
      */
-    start(): string {
+    async start(): Promise<string> {
         if (this._server !== null) {
             return this._url!;
         }
 
         const credentials = this._credentials;
+        const upstreamBaseUrls = this._upstreamBaseUrls;
 
         const server = http.createServer((req, res) => {
             const chunks: Buffer[] = [];
             req.on("data", (chunk: Buffer) => chunks.push(chunk));
             req.on("end", () => {
                 const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
-                forwardRequest(req, res, credentials, body);
+                forwardRequest(req, res, credentials, upstreamBaseUrls, body);
             });
             req.on("error", () => {
                 res.writeHead(400);
@@ -136,32 +192,19 @@ export class CredentialProxy {
             });
         });
 
-        server.listen(this._port, this._host, () => {
-            const addr = server.address();
-            const actualPort = addr && typeof addr === "object" ? addr.port : this._port;
-            this._url = `http://${this._host}:${actualPort}`;
+        this._server = server;
+        await new Promise<void>((resolve, reject) => {
+            server.once("error", reject);
+            server.listen(this._port, this._host, () => {
+                server.off("error", reject);
+                const addr = server.address();
+                const actualPort = addr && typeof addr === "object" ? addr.port : this._port;
+                this._url = `http://${this._host}:${actualPort}`;
+                resolve();
+            });
         });
 
-        this._server = server;
-
-        // Wait synchronously for the listen to complete (port assignment)
-        // The server emits 'listening' before the callback — we already have _url set above.
-        // For port 0 we need to wait; use a spin-wait on _url.
-        const deadline = Date.now() + 5000;
-        while (!this._url && Date.now() < deadline) {
-            // Node.js is single-threaded; the listen callback fires asynchronously.
-            // Force the event loop tick via a sync check — in practice _url is set
-            // by the time we reach here because listen() calls the callback inline
-            // when the port is already bound (for OS-assigned ports it's immediate).
-        }
-
-        if (!this._url) {
-            const addr = server.address();
-            const actualPort = addr && typeof addr === "object" ? addr.port : this._port;
-            this._url = `http://${this._host}:${actualPort}`;
-        }
-
-        return this._url;
+        return this._url!;
     }
 
     /** Shut down the proxy server. */
