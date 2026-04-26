@@ -413,6 +413,9 @@ export async function createClawAgent({
     mcpServers,
     handoffs,
     name,
+    toolDiscovery = true,
+    toolDiscoveryMaxResults,
+    toolDiscoveryMaxProfile,
 }: {
     model?: string | LLMProvider;
     apiKey?: string;
@@ -456,6 +459,12 @@ export async function createClawAgent({
     handoffs?: Handoff[];
     /** Agent display name (used for handoff defaults and tracing). */
     name?: string;
+    /** Register compact tool discovery helpers by default. */
+    toolDiscovery?: boolean;
+    /** Default result cap for tool_discover. */
+    toolDiscoveryMaxResults?: number;
+    /** Maximum profile exposed through discovery helpers. */
+    toolDiscoveryMaxProfile?: "minimal" | "read-only" | "write" | "full";
 } = {}): Promise<ClawAgent> {
     // ── Resolve opt-in flags ─────────────────────────────────────────
     const envTrue = (key: string) => ["1", "true", "yes"].includes(
@@ -643,6 +652,17 @@ export async function createClawAgent({
         await manager.start(registry);
         // Expose the manager so callers can shutdown explicitly.
         (agent as unknown as { mcpManager?: unknown }).mcpManager = manager;
+    }
+
+    // Compact discovery is registered last so it can see user, subagent, and MCP tools.
+    if (toolDiscovery) {
+        const { createToolDiscoveryTools } = await import("./tools/catalog.js");
+        for (const discoveryTool of createToolDiscoveryTools(registry, {
+            maxResults: toolDiscoveryMaxResults,
+            maxProfile: toolDiscoveryMaxProfile,
+        })) {
+            if (!registry.get(discoveryTool.name)) registry.register(discoveryTool);
+        }
     }
 
     return agent;

@@ -5,9 +5,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { AgentStatus, type AgentState } from "./graph/agent-loop.js";
+import { AgentStatus, runAgentGraph, type AgentState } from "./graph/agent-loop.js";
+import { createClawAgent } from "./agent.js";
+import type { LLMProvider } from "./providers/llm.js";
 import { InMemorySession } from "./session/backends.js";
 import { ToolRegistry, type Tool } from "./tools/registry.js";
+import { createExecTools } from "./tools/exec.js";
 import { createToolDiscoveryTools, namesForToolProfile } from "./tools/catalog.js";
 import { SqliteResultCacheManager } from "./tools/cache.js";
 import { DockerBackend } from "./sandbox/docker.js";
@@ -39,6 +42,13 @@ function makeTool(name: string, description = `tool ${name}`, keywords?: string[
     };
 }
 
+const fakeLLM: LLMProvider = {
+    name: "fake",
+    async chat() {
+        throw new Error("chat should not be called");
+    },
+};
+
 test("compact tool discovery exposes searchable catalog and named profiles", async () => {
     const registry = new ToolRegistry();
     registry.register(makeTool("read_file", "Read a file"));
@@ -58,6 +68,11 @@ test("compact tool discovery exposes searchable catalog and named profiles", asy
     assert.deepEqual(keywordFound.map((x: { name: string }) => x.name), ["scan_x7"]);
     assert.deepEqual(keywordFound[0].keywords, ["search", "find text", "file contents"]);
 
+    const tokenDiscover = await registry.executeTool("tool_discover", { query: "find units" });
+    assert.equal(tokenDiscover.success, true);
+    const tokenFound = JSON.parse(String(tokenDiscover.output));
+    assert.deepEqual(tokenFound.map((x: { name: string }) => x.name), ["scan_x7"]);
+
     const described = await registry.executeTool("tool_describe", { name: "scan_x7" });
     assert.equal(described.success, true);
     assert.deepEqual(JSON.parse(String(described.output)).keywords, ["search", "find text", "file contents"]);
@@ -72,6 +87,130 @@ test("compact tool discovery exposes searchable catalog and named profiles", asy
     for (const tool of createToolDiscoveryTools(bounded, { maxProfile: "read-only" })) bounded.register(tool);
     const denied = await bounded.executeTool("tool_describe", { name: "write_file" });
     assert.equal(denied.success, false);
+});
+
+test("agent factory registers compact discovery and token-aware lookup by default", async () => {
+    const agent = await createClawAgent({ model: fakeLLM, memory: [], skills: [] });
+    assert.ok(agent.tools.get("tool_discover"));
+
+    const grepResult = await agent.tools.executeTool("tool_discover", { query: "find text", profile: "read-only" });
+    assert.equal(grepResult.success, true);
+    const grepFound = JSON.parse(String(grepResult.output));
+    assert.equal(grepFound[0].name, "grep");
+    assert.ok(grepFound[0].keywords.includes("find text"));
+
+    const listResult = await agent.tools.executeTool("tool_discover", { query: "list folder", profile: "read-only" });
+    const listFound = JSON.parse(String(listResult.output));
+    assert.ok(listFound.some((x: { name: string }) => x.name === "ls"));
+
+    const editResult = await agent.tools.executeTool("tool_discover", { query: "edit text", profile: "full" });
+    const editFound = JSON.parse(String(editResult.output));
+    assert.ok(editFound.some((x: { name: string }) => x.name === "edit_file"));
+});
+
+test("execute returns structured context for nonzero command exits", async () => {
+    const backend = {
+        kind: "fake",
+        cwd: "/tmp",
+        sep: "/",
+        resolve: (...parts: string[]) => parts.join("/"),
+        relative: (_from: string, to: string) => to,
+        dirname: (p: string) => path.dirname(p),
+        basename: (p: string) => path.basename(p),
+        join: (...parts: string[]) => path.join(...parts),
+        safePath: (p: string) => p,
+        readFile: async () => "",
+        readFileBytes: async () => Buffer.from(""),
+        writeFile: async () => undefined,
+        readDir: async () => [],
+        mkdir: async () => undefined,
+        exists: async () => false,
+        stat: async () => ({ isFile: false, isDirectory: false, size: 0, mtimeMs: 0 }),
+        exec: async () => ({
+            stdout: "F\nFAILED tests/test_sample.ts::test_demo",
+            stderr: "assertion failed",
+            exitCode: 1,
+        }),
+    };
+    const tool = createExecTools(backend)[0]!;
+    const result = await tool.execute({ command: "npm test" });
+
+    assert.equal(result.success, false);
+    const payload = JSON.parse(String(result.output));
+    assert.equal(payload.command_executed, true);
+    assert.equal(payload.exit_code, 1);
+    assert.equal(payload.command, "npm test");
+    assert.match(payload.stdout, /FAILED/);
+    assert.match(payload.stderr, /assertion failed/);
+    assert.match(payload.interpretation, /nonzero/i);
+});
+
+test("repeated execute calls get a command-specific recovery hint", async () => {
+    class RepeatingExecuteLLM implements LLMProvider {
+        name = "repeat";
+        calls = 0;
+        seen: Array<Parameters<LLMProvider["chat"]>[0]> = [];
+
+        async chat(messages: Parameters<LLMProvider["chat"]>[0]) {
+            this.calls += 1;
+            this.seen.push(messages.map((m) => ({ ...m })));
+            if (this.calls <= 4) {
+                return {
+                    content: "",
+                    model: "fake",
+                    tokensUsed: 1,
+                    toolCalls: [{
+                        toolName: "execute",
+                        args: { command: "npm test" },
+                        toolCallId: `call_${this.calls}`,
+                    }],
+                };
+            }
+            return { content: "done", model: "fake", tokensUsed: 1 };
+        }
+    }
+
+    const llm = new RepeatingExecuteLLM();
+    const registry = new ToolRegistry();
+    registry.register({
+        name: "execute",
+        description: "Execute a command",
+        parameters: { command: { type: "string", description: "command", required: true } },
+        async execute() {
+            return {
+                success: false,
+                output: '{"command_executed":true,"exit_code":1,"stdout":"FAILED","stderr":""}',
+                error: "Command exited with code 1: npm test",
+            };
+        },
+    });
+
+    await runAgentGraph(
+        "run tests",
+        llm,
+        registry,
+        undefined,
+        8,
+        false,
+        1_000_000,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+    );
+
+    const hints = llm.seen.flatMap((batch) =>
+        batch.filter((m) => m.role === "user").map((m) => String(m.content)),
+    );
+    const transcript = llm.seen.flat().map((m) => String(m.content)).join("\n");
+    assert.match(transcript, /command_executed/);
+    assert.match(transcript, /exit_code/);
+    assert.ok(hints.some((m) =>
+        m.includes("execute command") &&
+        m.includes("nonzero") &&
+        m.includes("Do not rerun"),
+    ));
 });
 
 test("sqlite result cache persists successful tool results across instances", { skip: !hasNodeSqlite }, () => {

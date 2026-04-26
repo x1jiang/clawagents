@@ -4,6 +4,31 @@ import { isWriteClassTool } from "../permissions/mode.js";
 export type ToolProfileName = "minimal" | "read-only" | "write" | "full";
 
 const DISCOVERY_TOOL_NAMES = new Set(["tool_discover", "tool_describe", "tool_profile"]);
+const SEARCH_STOP_WORDS = new Set(["a", "an", "and", "for", "in", "of", "or", "the", "to", "with"]);
+
+function normalizeSearchText(value: string): string {
+    return value.toLowerCase().replace(/[_-]+/g, " ");
+}
+
+function queryTokens(query: string): string[] {
+    return normalizeSearchText(query)
+        .split(/[^a-z0-9]+/i)
+        .map((token) => token.trim())
+        .filter((token) => token.length > 0 && !SEARCH_STOP_WORDS.has(token));
+}
+
+function matchesToolQuery(tool: Tool, query: string): boolean {
+    const q = normalizeSearchText(query).trim();
+    if (!q) return true;
+    const haystack = normalizeSearchText([
+        tool.name,
+        tool.description,
+        ...(tool.keywords ?? []),
+    ].join(" "));
+    if (haystack.includes(q)) return true;
+    const tokens = queryTokens(q);
+    return tokens.length > 0 && tokens.every((token) => haystack.includes(token));
+}
 
 export function namesForToolProfile(
     registry: ToolRegistry,
@@ -62,15 +87,7 @@ export function createToolDiscoveryTools(
                 .list()
                 .filter((tool) => allowed.has(tool.name))
                 .filter((tool) => profile === "minimal" || !DISCOVERY_TOOL_NAMES.has(tool.name))
-                .filter((tool) => {
-                    if (!q) return true;
-                    const keywords = tool.keywords ?? [];
-                    return (
-                        tool.name.toLowerCase().includes(q) ||
-                        tool.description.toLowerCase().includes(q) ||
-                        keywords.some((keyword) => keyword.toLowerCase().includes(q))
-                    );
-                })
+                .filter((tool) => matchesToolQuery(tool, q))
                 .slice(0, limit)
                 .map((tool) => ({
                     name: tool.name,

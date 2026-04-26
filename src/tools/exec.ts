@@ -46,6 +46,38 @@ export function isDangerousCommand(command: string): boolean {
     return BLOCKED_PATTERNS.some((p) => command.includes(p));
 }
 
+function truncateExecOutput(output: string): string {
+    if (output.length <= MAX_OUTPUT_CHARS) return output;
+    const originalLen = output.length;
+    return (
+        output.slice(0, MAX_OUTPUT_CHARS / 2) +
+        `\n\n... [truncated ${originalLen - MAX_OUTPUT_CHARS} chars] ...\n\n` +
+        output.slice(-MAX_OUTPUT_CHARS / 2)
+    );
+}
+
+function formatNonzeroCommandOutput(
+    command: string,
+    exitCode: number,
+    stdout: string,
+    stderr: string,
+    warningPrefix: string,
+): string {
+    const payload: Record<string, unknown> = {
+        command_executed: true,
+        success: false,
+        exit_code: exitCode,
+        command,
+        stdout: truncateExecOutput(stdout || ""),
+        stderr: truncateExecOutput(stderr || ""),
+        interpretation:
+            "The command ran and exited nonzero. Treat stdout/stderr as diagnostic feedback, not as a tool transport failure.",
+    };
+    const warning = warningPrefix.trim();
+    if (warning) payload["warning"] = warning;
+    return JSON.stringify(payload, null, 2);
+}
+
 function createExecTool(sb: SandboxBackend): Tool {
     return {
         name: "execute",
@@ -161,27 +193,26 @@ function createExecTool(sb: SandboxBackend): Tool {
                             };
                         }
 
+                        const success = result.exitCode === 0;
+                        if (!success) {
+                            return {
+                                success: false,
+                                output: formatNonzeroCommandOutput(
+                                    command,
+                                    result.exitCode,
+                                    result.stdout || "",
+                                    result.stderr || "",
+                                    warningPrefix,
+                                ),
+                                error: `Command exited with code ${result.exitCode}: ${command}`,
+                            };
+                        }
+
                         let output = result.stdout || "";
                         if (result.stderr) {
                             output += (output ? "\n" : "") + `[stderr] ${result.stderr}`;
                         }
-
-                        if (output.length > MAX_OUTPUT_CHARS) {
-                            const originalLen = output.length;
-                            output =
-                                output.slice(0, MAX_OUTPUT_CHARS / 2) +
-                                `\n\n... [truncated ${originalLen - MAX_OUTPUT_CHARS} chars] ...\n\n` +
-                                output.slice(-MAX_OUTPUT_CHARS / 2);
-                        }
-
-                        const success = result.exitCode === 0;
-                        if (!success && !output) {
-                            return {
-                                success: false,
-                                output: result.stderr ?? "",
-                                error: `Command failed with exit code ${result.exitCode}: ${command}`,
-                            };
-                        }
+                        output = truncateExecOutput(output);
 
                         return {
                             success,

@@ -22,7 +22,7 @@
 
 import type { LLMProvider, LLMMessage, StreamOptions, LLMResponse, NativeToolSchema } from "../providers/llm.js";
 import { stripThinkingTokens } from "../providers/llm.js";
-import type { ToolRegistry, ParsedToolCall } from "../tools/registry.js";
+import type { ToolRegistry, ParsedToolCall, ToolResult } from "../tools/registry.js";
 import { writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setOverrides } from "../config/features.js";
@@ -156,6 +156,14 @@ function evictLargeToolResult(toolName: string, output: string): string {
             `\n\n... [truncated ${output.length - EVICTION_CHARS_THRESHOLD} chars] ...\n\n` +
             output.slice(-half);
     }
+}
+
+function toolObservation(result: ToolResult): string | any[] {
+    if (result.success) return result.output;
+    const error = result.error ? `Error: ${result.error}` : "Error: Tool failed";
+    if (Array.isArray(result.output)) return [error, ...result.output];
+    const output = String(result.output ?? "").trim();
+    return output ? `${error}\nOutput:\n${output}` : error;
 }
 
 // ─── Model-Aware Context Budget (learned from deepagents) ─────────────────
@@ -388,7 +396,9 @@ Keep working until the task is fully complete.
 - NEVER re-read a file you already have in context. Use the data from previous tool results.
 - NEVER call the same tool with the same arguments twice. If you already have the result, use it.
 - Batch independent tool calls into a single response when possible (use the array syntax).
-- Prefer fewer, well-targeted tool calls over many exploratory ones.`;
+- Prefer fewer, well-targeted tool calls over many exploratory ones.
+- Use todo/planning tools only for broad or long-running tasks. Skip todo bookkeeping for bounded lookup, read, compare, or JSON-report tasks.
+- Once tool results contain enough evidence to answer, stop calling tools and answer directly. Do not call tools only to mark progress complete.`;
 
 // ─── Adaptive Token Estimation (learned from deepagents) ──────────────────
 // Now uses js-tiktoken for accurate BPE counting (with fallback to heuristic).
@@ -1999,14 +2009,17 @@ export async function runAgentGraph<TContext = unknown>(
             if (loopTracker.isSoftLoopingBatch(toolCalls)) {
                 loopTracker.recordBatch(toolCalls);
                 const n = loopTracker.bumpSoftWarning();
-                const repeatedNames = toolCalls
-                    .filter((c) => loopTracker.isSoftLooping(c.toolName, c.args))
-                    .map((c) => c.toolName)
-                    .join(", ");
+                const repeatedCalls = toolCalls.filter((c) =>
+                    loopTracker.isSoftLooping(c.toolName, c.args),
+                );
+                const repeatedNames = repeatedCalls.map((c) => c.toolName).join(", ");
+                const hasRepeatedExecute = repeatedCalls.some((c) => c.toolName === "execute");
                 emit("warn", { message: `repeated tool call warning #${n}: ${repeatedNames}` });
                 messages.push({
                     role: "user",
-                    content: `[System] You are re-calling ${repeatedNames} with the same arguments. You already have the result in the conversation above. Use the existing data instead of re-reading. If you believe the task is complete, provide your final answer now.`,
+                    content: hasRepeatedExecute
+                        ? `[System] You are re-calling the same execute command with the same arguments. The command already ran; if the previous result has success=false or a nonzero exit_code, treat stdout/stderr as diagnostic feedback, not as a tool failure. Read the prior output, then edit code or inspect new evidence before trying again. Do not rerun this command until something relevant changed. If you believe the task is complete, provide your final answer now.`
+                        : `[System] You are re-calling ${repeatedNames} with the same arguments. You already have the result in the conversation above. Use the existing data instead of re-reading. If you believe the task is complete, provide your final answer now.`,
                 });
                 state.iterations += 1;
                 continue;
@@ -2152,9 +2165,7 @@ export async function runAgentGraph<TContext = unknown>(
                     } catch (hookErr) { emit("warn", { message: `afterTool hook error: ${hookErr}` }); }
                 }
 
-                const rawOutput = toolResult.success
-                    ? toolResult.output
-                    : `Error: ${toolResult.error}`;
+                const rawOutput = toolObservation(toolResult);
 
                 let toolOutput: string | any[];
                 let preview: string;
@@ -2404,7 +2415,7 @@ export async function runAgentGraph<TContext = unknown>(
                             } else { emit("warn", { message: "afterTool returned invalid ToolResult — ignored" }); }
                         } catch (hookErr) { emit("warn", { message: `afterTool hook error: ${hookErr}` }); }
                     }
-                    const rawOut = result.success ? result.output : `Error: ${result.error}`;
+                    const rawOut = toolObservation(result);
                     let output: string | any[];
                     let preview: string;
                     if (typeof rawOut !== "string") {
