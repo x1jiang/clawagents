@@ -146,11 +146,57 @@ async function cmdDoctor() {
         check("Messaging channels", true, "none configured (set TELEGRAM_BOT_TOKEN, WHATSAPP_AUTH_DIR, or SIGNAL_ACCOUNT)");
     }
 
+    const catalog = await buildBuiltinToolCatalog();
+    check("Tool catalog", catalog.length > 0, `${catalog.length} built-in tools inspectable`);
+
     process.stderr.write("\n" + "=".repeat(40) + "\n");
     if (issues === 0) {
         process.stderr.write("✓ All checks passed. Ready to run.\n\n");
     } else {
         process.stderr.write(`✗ ${issues} issue(s) found. Fix the items above.\n\n`);
+    }
+}
+
+async function buildBuiltinToolCatalog() {
+    const { ToolRegistry } = await import("./tools/registry.js");
+    const { LocalBackend } = await import("./sandbox/local.js");
+    const { createFilesystemTools } = await import("./tools/filesystem.js");
+    const { createExecTools } = await import("./tools/exec.js");
+    const { createAdvancedFsTools } = await import("./tools/advanced-fs.js");
+    const { webTools } = await import("./tools/web.js");
+    const { todolistTools } = await import("./tools/todolist.js");
+    const { thinkTools } = await import("./tools/think.js");
+    const { interactiveTools } = await import("./tools/interactive.js");
+    const { createToolProgramTool } = await import("./tools/tool-program.js");
+
+    const sb = new LocalBackend();
+    const registry = new ToolRegistry();
+    for (const tool of [
+        ...todolistTools,
+        ...thinkTools,
+        ...interactiveTools,
+        ...createFilesystemTools(sb),
+        ...createExecTools(sb),
+        ...createAdvancedFsTools(sb),
+        ...webTools.filter((t) => t.name === "web_fetch"),
+    ]) {
+        registry.register(tool);
+    }
+    registry.register(createToolProgramTool(registry));
+    return registry.inspectTools();
+}
+
+async function cmdTools(json = false) {
+    const catalog = await buildBuiltinToolCatalog();
+    if (json) {
+        process.stdout.write(JSON.stringify(catalog, null, 2) + "\n");
+        return;
+    }
+    for (const tool of catalog) {
+        const params = Object.entries(tool.parameters)
+            .map(([name, spec]) => `${name}${spec.required ? "*" : ""}`)
+            .join(", ");
+        process.stdout.write(`${tool.name}${params ? ` (${params})` : ""} — ${tool.description}\n`);
     }
 }
 
@@ -227,6 +273,11 @@ async function main() {
 
     if (args.includes("--doctor")) {
         await cmdDoctor();
+        return;
+    }
+
+    if (args.includes("--tools")) {
+        await cmdTools(args.includes("--json"));
         return;
     }
 
@@ -367,6 +418,7 @@ ClawAgents — lean, full-stack agentic AI framework
 Usage:
   clawagents --task "..."              Run a single task
   clawagents --doctor                  Check configuration health
+  clawagents --tools [--json]          Inspect built-in tool schemas
   clawagents --trajectory [N]          Show last N run summaries (default: 1)
   clawagents --prune-trajectories [N]  Delete trajectory files older than N days (default: 30)
   clawagents --sessions                List saved sessions

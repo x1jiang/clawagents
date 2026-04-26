@@ -55,11 +55,19 @@ export type { FunctionToolOptions, CreateToolOptions, FunctionToolParamSpec, Jso
 export { InMemorySession, JsonlFileSession, SqliteSession } from "./session/backends.js";
 export type { Session } from "./session/backends.js";
 export type { Tool, ToolResult, ToolRegistry } from "./tools/registry.js";
+export type { ToolCatalogEntry } from "./tools/registry.js";
 export { ResultCacheManager } from "./tools/cache.js";
 export { validateToolArgs, formatValidationErrors } from "./tools/validate.js";
 export type { ValidationResult, ValidationError } from "./tools/validate.js";
 export { createComposeTool } from "./tools/compose.js";
 export type { ComposeToolConfig, CallTool, PipelineStep, StepBuilder } from "./tools/compose.js";
+export { createToolProgramTool } from "./tools/tool-program.js";
+export type { ToolProgramOptions } from "./tools/tool-program.js";
+export { runTextEnvironment } from "./eval.js";
+export type {
+    TextEnvironment, TextEnvInit, TextEnvStepOutput,
+    TextEvaluationResult, TextEvaluationStep, TextResponder,
+} from "./eval.js";
 export type { LLMProvider, LLMMessage, LLMResponse } from "./providers/llm.js";
 export { TrajectoryRecorder, classifyFailure, pruneTrajectories } from "./trajectory/recorder.js";
 export type { TurnRecord, RunSummary, ToolCallRecord } from "./trajectory/recorder.js";
@@ -117,6 +125,13 @@ export type { SessionInfo, SessionEvent } from "./session/persistence.js";
 
 // SSRF helpers (exposed so consumers / tests can verify guardrails)
 export { ssrfDeps } from "./tools/web.js";
+export { normalizeSandboxManifest } from "./sandbox/manifest.js";
+export type {
+    SandboxManifest,
+    SandboxManifestEntry,
+    NormalizedSandboxManifest,
+    NormalizedSandboxManifestEntry,
+} from "./sandbox/manifest.js";
 
 // ── Settings hierarchy (v6.4) ────────────────────────────────────────
 export {

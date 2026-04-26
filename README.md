@@ -1,14 +1,16 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.2**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.6.3**
 
-> **v6.6.2 (April 2026)** — Performance and release hardening for the
+> **v6.6.3 (April 2026)** — Performance and release hardening for the
 > Hermes-parity line. Persisted sessions now preload a bounded history by
 > default, large in-process diffs return bounded summaries instead of building
 > huge LCS tables, and single-file grep stops at the same match cap as
 > directory grep. The Python sibling also offloads local async filesystem I/O
-> and appends trajectory run summaries. **492 TypeScript tests** pass,
-> `tsc --noEmit` clean; **772 Python tests** pass. See [Changelog](#changelog).
+> and appends trajectory run summaries. **497 TypeScript tests** pass
+> (**49 parity checks**), `tsc --noEmit` clean; **778 Python tests** pass.
+> Real `.env` smoke tests passed against Gemini and OpenAI, including
+> read-only tool use and subagent delegation. See [Changelog](#changelog).
 
 ## Installation
 
@@ -353,6 +355,7 @@ clawagents --task "hello world"                              # 5. Run first task
 | Command | Description |
 |:---|:---|
 | `--doctor` | Check configuration health: `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history. |
+| `--tools [--json]` | Inspect built-in tool schemas without starting a model client. Useful for release checks and native-tool schema debugging. |
 | `--task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result. |
 | `--trajectory [N]` | Inspect the last N run summaries (default: 1). Shows score, quality, failures, judge verdict. Requires `CLAW_TRAJECTORY=1`. |
 | `--port N` | Start the HTTP gateway server on port N (default: 3000). |
@@ -489,6 +492,7 @@ Every agent includes these — no setup needed:
 | `task` | Delegate to a sub-agent with isolated context |
 | `use_skill` | Load a skill's instructions (when skills exist) |
 | `ask_user_question` | Structured HITL: ask 1-3 multiple-choice questions in one batch (opt-in) |
+| `tool_program` | Bounded read-only multi-tool sequence with `${step.output}` substitutions |
 
 ### Structured HITL — `ask_user_question`
 
@@ -852,11 +856,13 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Changelog
 
-### v6.6.2 — Efficiency and release hardening (April 2026)
+### v6.6.3 — Efficiency and release hardening (April 2026)
 
 Patch release for the v6.6 line. Test totals after this release:
-**TypeScript 492 passed, 4 skipped**; **Python 772 passed, 3 skipped**;
-`tsc --noEmit` clean.
+**TypeScript 497 passed, 4 skipped** plus **49 parity checks**;
+**Python 778 passed, 3 skipped**; `tsc --noEmit` clean. Real `.env`
+smoke tests passed for Gemini and OpenAI, including read-only `read_file`
+tool use and `task` subagent delegation in both ports.
 
 - **Bounded session preload** — the agent loop now preloads at most 200 prior
   session messages by default, while callers can pass
@@ -1397,14 +1403,14 @@ await router.startAll({
 ```bash
 npm install
 
-# Run the full test suite (passes on v6.6.2)
+# Run the full test suite (passes on v6.6.3)
 npm test
 
 # Hermetic runner — exactly the environment CI uses (pinned
 # --test-concurrency=4, TZ=UTC, NODE_ENV=test, credentials scrubbed)
 npm run test:hermetic
 
-# Type-check without emitting (clean, exit 0 on v6.6.2)
+# Type-check without emitting (clean, exit 0 on v6.6.3)
 npm run typecheck
 
 # Build dist/ (runs typecheck under the hood)

@@ -1,6 +1,6 @@
 {
   "name": "clawagents",
-  "version": "6.6.2",
+  "version": "6.6.3",
   "description": "Backend agent engine combining openclaw resilience with deepagents reasoning",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,6 +26,10 @@
       "types": "./dist/cron/index.d.ts",
       "import": "./dist/cron/index.js"
     },
+    "./eval": {
+      "types": "./dist/eval.d.ts",
+      "import": "./dist/eval.js"
+    },
     "./media": {
       "types": "./dist/media/index.d.ts",
       "import": "./dist/media/index.js"
@@ -49,6 +53,14 @@
     "./rl": {
       "types": "./dist/rl/index.d.ts",
       "import": "./dist/rl/index.js"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox/index.d.ts",
+      "import": "./dist/sandbox/index.js"
+    },
+    "./sandbox/*": {
+      "types": "./dist/sandbox/*.d.ts",
+      "import": "./dist/sandbox/*.js"
     },
     "./settings": {
       "types": "./dist/settings/index.d.ts",
@@ -94,7 +106,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/session-preload.test.ts src/redact.test.ts src/commands.test.ts src/steer.test.ts src/paths.test.ts src/aux-models.test.ts src/transport.test.ts src/memory/compaction.test.ts src/background.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/subagent.test.ts src/tools/web.test.ts src/tools/ask-user-question.test.ts src/tools/exec-safety-v2.test.ts src/media/images.test.ts src/settings/resolver.test.ts src/testing/mock-provider.test.ts src/tracing/tracing.test.ts src/mcp/mcp.test.ts src/mcp/env-scrub.test.ts src/sandbox/credential-proxy.test.ts src/gateway/gateway.test.ts src/handoffs.test.ts src/browser/browser.test.ts src/cron/cron.test.ts src/acp/acp.test.ts src/rl/rl.test.ts tests/simulated.test.ts",
+    "test": "tsx --test src/corner_cases.test.ts src/tools_comprehensive.test.ts src/interface.test.ts src/gemini_thought_signature.test.ts src/malformed_fn_call.test.ts src/session-preload.test.ts src/tooling-next.test.ts src/redact.test.ts src/commands.test.ts src/steer.test.ts src/paths.test.ts src/aux-models.test.ts src/transport.test.ts src/memory/compaction.test.ts src/background.test.ts src/tools/registry.test.ts src/tools/registry.integration.test.ts src/tools/subagent.test.ts src/tools/web.test.ts src/tools/ask-user-question.test.ts src/tools/exec-safety-v2.test.ts src/media/images.test.ts src/settings/resolver.test.ts src/testing/mock-provider.test.ts src/tracing/tracing.test.ts src/mcp/mcp.test.ts src/mcp/env-scrub.test.ts src/sandbox/credential-proxy.test.ts src/gateway/gateway.test.ts src/handoffs.test.ts src/browser/browser.test.ts src/cron/cron.test.ts src/acp/acp.test.ts src/rl/rl.test.ts tests/simulated.test.ts",
     "test:hermetic": "bash scripts/run_tests.sh",
     "test:surfaces": "tsx tests/openai_agents_surfaces.test.ts",
     "test:all": "npm run test && npm run test:surfaces",

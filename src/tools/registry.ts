@@ -57,6 +57,15 @@ export interface ParsedToolCall {
     args: Record<string, unknown>;
 }
 
+export interface ToolCatalogEntry {
+    name: string;
+    description: string;
+    parameters: Tool["parameters"];
+    cacheable: boolean;
+    parallelSafe: boolean;
+    pathScopedArg: string | null;
+}
+
 import { ResultCacheManager } from "./cache.js";
 import { validateToolArgs, formatValidationErrors } from "./validate.js";
 import { resolve } from "node:path";
@@ -144,9 +153,13 @@ export function truncateToolOutput(
 ): string | any[] {
     if (typeof output !== "string") return output;
     if (output.length <= maxChars) return output;
-    const head = output.slice(0, TRUNCATION_HEAD_CHARS);
-    const tail = output.slice(-TRUNCATION_TAIL_CHARS);
-    const dropped = output.length - TRUNCATION_HEAD_CHARS - TRUNCATION_TAIL_CHARS;
+    const markerBudget = 40;
+    const payloadBudget = Math.max(20, maxChars - markerBudget);
+    const headChars = Math.min(TRUNCATION_HEAD_CHARS, Math.max(1, Math.floor(payloadBudget * 0.7)));
+    const tailChars = Math.min(TRUNCATION_TAIL_CHARS, Math.max(1, payloadBudget - headChars));
+    const head = output.slice(0, headChars);
+    const tail = output.slice(-tailChars);
+    const dropped = Math.max(0, output.length - head.length - tail.length);
     return `${head}\n\n[… truncated ${dropped} characters …]\n\n${tail}`;
 }
 
@@ -272,6 +285,17 @@ export class ToolRegistry {
 
     list(): Tool[] {
         return Array.from(this.tools.values());
+    }
+
+    inspectTools(): ToolCatalogEntry[] {
+        return this.list().map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+            cacheable: tool.cacheable === true,
+            parallelSafe: isParallelSafe(tool),
+            pathScopedArg: tool.pathScopedArg ?? DEFAULT_PATH_SCOPED_ARGS[tool.name] ?? null,
+        }));
     }
 
     describeForLLM(): string {
