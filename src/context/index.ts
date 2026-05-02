@@ -5,3 +5,13 @@ export {
     resolveContextEngine,
     listContextEngines,
 } from "./engine.js";
+export {
+    COMPACTION_CARRYOVER_KEY,
+    emptyCompactionCarryover,
+    formatCompactionCarryover,
+    getCompactionCarryover,
+    isCompactionCarryoverEmpty,
+    normalizeCompactionCarryover,
+    setCompactionCarryover,
+} from "./carryover.js";
+export type { ChannelCarryoverEntry, CompactionCarryover } from "./carryover.js";

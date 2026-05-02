@@ -9,7 +9,12 @@
  *   - Hooks: onInbound, onOutbound, onError for observability
  */
 
-import type { ChannelAdapter, ChannelMessage } from "./types.js";
+import {
+    channelMessageToAgentInput,
+    normalizeChannelMessage,
+    type ChannelAdapter,
+    type ChannelMessage,
+} from "./types.js";
 import { KeyedAsyncQueue } from "./keyed-queue.js";
 import type { ClawAgent } from "../agent.js";
 
@@ -108,6 +113,7 @@ export class ChannelRouter {
                 const combined: ChannelMessage = {
                     ...messages[messages.length - 1]!,
                     body: messages.map((m) => m.body).join("\n"),
+                    media: messages.flatMap((m) => m.media ?? []),
                 };
                 this.dispatch(combined);
             }, debounceMs),
@@ -125,7 +131,8 @@ export class ChannelRouter {
                 }
 
                 const agent = await this.agentFactory();
-                const result = await agent.invoke(msg.body);
+                const normalized = normalizeChannelMessage(msg);
+                const result = await agent.invoke(channelMessageToAgentInput(normalized));
                 let reply = result.result ?? "";
 
                 if (this.opts.onOutbound) {

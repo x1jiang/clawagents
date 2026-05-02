@@ -1,4 +1,10 @@
-export type { ChannelMessage, ChannelAdapter } from "./types.js";
+export type { ChannelMessage, ChannelAdapter, ChannelAttachment, ChannelCommand } from "./types.js";
+export {
+    channelMessageToAgentInput,
+    normalizeChannelAttachments,
+    normalizeChannelMessage,
+    parseChannelCommand,
+} from "./types.js";
 export { KeyedAsyncQueue } from "./keyed-queue.js";
 export { ChannelRouter } from "./router.js";
 export type { AgentFactory, ChannelRouterOptions } from "./router.js";

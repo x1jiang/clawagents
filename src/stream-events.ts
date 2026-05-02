@@ -76,6 +76,17 @@ export interface GuardrailTrippedEvent extends BaseStreamEvent {
     message: string;
 }
 
+export interface CompactProgressEvent extends BaseStreamEvent {
+    kind: "compact_progress";
+    phase: string;
+    message: string;
+    currentTokens: number;
+    budget: number;
+    messageCount: number;
+    olderMessages: number;
+    recentMessages: number;
+}
+
 export interface HandoffOccurredEvent extends BaseStreamEvent {
     kind: "handoff_occurred";
     fromAgent: string;
@@ -110,6 +121,7 @@ export type StreamEvent =
     | ApprovalRequiredEvent
     | UsageEvent
     | GuardrailTrippedEvent
+    | CompactProgressEvent
     | HandoffOccurredEvent
     | FinalOutputEvent
     | ErrorStreamEvent
@@ -194,6 +206,18 @@ export function streamEventFromKind(
                 where: str(data.where),
                 behavior: str(data.behavior),
                 message: str(data.message),
+            };
+        case "compact_progress":
+            return {
+                ...base,
+                kind,
+                phase: str(data.phase),
+                message: str(data.message),
+                currentTokens: num(data.currentTokens ?? data.current_tokens),
+                budget: num(data.budget),
+                messageCount: num(data.messageCount ?? data.message_count),
+                olderMessages: num(data.olderMessages ?? data.older_messages),
+                recentMessages: num(data.recentMessages ?? data.recent_messages),
             };
         case "handoff_occurred":
             return {

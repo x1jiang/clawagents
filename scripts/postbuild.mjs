@@ -3,13 +3,16 @@
  * Post-build helper:
  *   - Ensure dist/cli.js has a Node shebang so `bin` works.
  *   - Make dist/cli.js executable (chmod +x).
+ *   - Copy bundled skills into dist/ so npm packages include runtime skills.
  */
-import { readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, existsSync, cpSync, rmSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cliPath = resolve(__dirname, "..", "dist", "cli.js");
+const skillsSrc = resolve(__dirname, "..", "skills");
+const skillsDest = resolve(__dirname, "..", "dist", "skills");
 
 if (!existsSync(cliPath)) {
     console.error(`[postbuild] missing ${cliPath} — did tsc emit anything?`);
@@ -25,3 +28,9 @@ if (!original.startsWith("#!")) {
 
 chmodSync(cliPath, 0o755);
 console.log("[postbuild] chmod +x dist/cli.js");
+
+if (existsSync(skillsSrc)) {
+    rmSync(skillsDest, { recursive: true, force: true });
+    cpSync(skillsSrc, skillsDest, { recursive: true });
+    console.log("[postbuild] copied skills to dist/skills");
+}

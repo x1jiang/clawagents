@@ -43,6 +43,11 @@ import {
 } from "../session/heartbeat.js";
 import { RetryPolicy } from "../retry.js";
 import { handoffSpan } from "../tracing/context.js";
+import {
+    formatCompactionCarryover,
+    getCompactionCarryover,
+} from "../context/carryover.js";
+import { buildSystemPrompt } from "../prompts/index.js";
 
 // ─── Model Control Token Sanitization ─────────────────────────────────────
 // Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)
@@ -317,6 +322,7 @@ export type EventKind =
     | "tool_result_typed"
     | "usage"
     | "guardrail_tripped"
+    | "compact_progress"
     | "handoff_occurred"
     | "final_output";
 
@@ -974,13 +980,14 @@ async function summarizeChunk(
     throw lastError ?? new Error("Summarization returned empty");
 }
 
-async function compactIfNeeded(
+export async function compactIfNeeded(
     messages: LLMMessage[],
     contextWindow: number,
     llm: LLMProvider,
     emit: OnEvent,
     tokenMultiplier: number,
     modelName?: string,
+    runContext?: RunContext<unknown>,
 ): Promise<LLMMessage[]> {
     messages = truncateOldToolArgs(messages, RECENT_PROTECTED_COUNT);
 
@@ -993,6 +1000,13 @@ async function compactIfNeeded(
     if (currentTokens <= budget) return messages;
 
     emit("context", { message: `~${currentTokens} tokens exceeds budget ${budget} — compacting` });
+    emit("compact_progress", {
+        phase: "start",
+        message: "context budget exceeded; compacting older turns",
+        currentTokens,
+        budget,
+        messageCount: messages.length,
+    });
 
     const systemMessages: LLMMessage[] = [];
     const nonSystem: LLMMessage[] = [];
@@ -1015,6 +1029,7 @@ async function compactIfNeeded(
             break;
         }
     }
+    const carryover = getCompactionCarryover(runContext, taskContext);
 
     archivePreCompactTranscript(older, taskContext);
 
@@ -1040,6 +1055,13 @@ async function compactIfNeeded(
 
     try {
         let summaryText: string;
+        emit("compact_progress", {
+            phase: "summarize",
+            message: "summarizing compacted turns",
+            olderMessages: older.length,
+            recentMessages: recent.length,
+            carryover,
+        });
 
         if (totalTokens <= COMPACTION_CHUNK_TOKENS) {
             const textLog = textParts.join("\n\n");
@@ -1064,6 +1086,13 @@ async function compactIfNeeded(
             }
 
             emit("context", { message: `splitting ${textParts.length} parts into ${chunks.length} chunks for summarization` });
+            emit("compact_progress", {
+                phase: "chunk",
+                message: "splitting older turns into summary chunks",
+                chunks: chunks.length,
+                olderMessages: older.length,
+                recentMessages: recent.length,
+            });
 
             const chunkSummaries: string[] = [];
             for (let i = 0; i < chunks.length; i++) {
@@ -1075,17 +1104,42 @@ async function compactIfNeeded(
 
         if (!summaryText.trim()) {
             emit("context", { message: "compaction returned empty summary — dropping oldest" });
+            emit("compact_progress", {
+                phase: "dropped",
+                message: "empty compaction summary; dropped older turns",
+                olderMessages: older.length,
+                recentMessages: recent.length,
+                carryover,
+            });
             return [...systemMessages, ...recent];
         }
 
+        const carryoverText = formatCompactionCarryover(carryover);
+        const content = carryoverText
+            ? `[System — Compacted History]\n${carryoverText}\n\n## Conversation Summary\n${summaryText}`
+            : `[System — Compacted History]\n${summaryText}`;
         const summary: LLMMessage = {
             role: "user",
-            content: `[System — Compacted History]\n${summaryText}`,
+            content,
         };
         emit("context", { message: `compacted ${older.length} messages into summary` });
+        emit("compact_progress", {
+            phase: "end",
+            message: "compaction completed",
+            olderMessages: older.length,
+            recentMessages: recent.length,
+            carryover,
+        });
         return [...systemMessages, summary, ...recent];
     } catch {
         emit("context", { message: "compaction failed — dropping oldest messages" });
+        emit("compact_progress", {
+            phase: "failed",
+            message: "compaction failed; dropped older turns",
+            olderMessages: older.length,
+            recentMessages: recent.length,
+            carryover,
+        });
         return [...systemMessages, ...recent];
     }
 }
@@ -1436,7 +1490,8 @@ export async function runAgentGraph<TContext = unknown>(
     let tokenMultiplier = 1.0;
     let resolvedModelName: string | undefined;
 
-    let promptToUse = systemPrompt || BASE_SYSTEM_PROMPT;
+    const promptToUse = systemPrompt || BASE_SYSTEM_PROMPT;
+    let lessonPreamble = "";
 
     // PTRL Layer 1: Pre-run lesson injection
     // Subagents (skipMemory=true) run isolated from parent memory — Hermes parity.
@@ -1444,14 +1499,18 @@ export async function runAgentGraph<TContext = unknown>(
         const { buildLessonPreamble } = await import("../trajectory/lessons.js");
         const preamble = buildLessonPreamble();
         if (preamble) {
-            promptToUse = promptToUse + preamble;
+            lessonPreamble = preamble;
             emit("context", { message: "PTRL: injected lessons from past runs" });
         }
     }
 
     // Insert __CACHE_BOUNDARY__ between static (instructions + tools) and dynamic content.
     // The Anthropic provider splits on this marker to enable prompt caching.
-    const systemContent = promptToUse + "\n\n" + toolDesc + "\n__CACHE_BOUNDARY__";
+    const systemContent = buildSystemPrompt({
+        basePrompt: promptToUse,
+        toolDescription: toolDesc,
+        lessonPreamble,
+    });
     let messages: LLMMessage[] = [
         { role: "system", content: systemContent },
     ];
@@ -1629,7 +1688,7 @@ export async function runAgentGraph<TContext = unknown>(
             messages = patchDanglingToolCalls(messages);
             messages = microCompactToolResults(messages);  // Claude Code pattern: clear old tool results
             messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
-            messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
+            messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName, runContext);
 
             // External pre_llm hook (runs before programmatic hook)
             if (extHookRunner) {
@@ -1731,7 +1790,7 @@ export async function runAgentGraph<TContext = unknown>(
                     tokenMultiplier = Math.min(observedRatio * 1.1, 3.0);
                     emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)} (retry ${overflowRetries}/${MAX_OVERFLOW_RETRIES})` });
                     messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
-                    messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName);
+                    messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName, runContext);
                     continue;
                 }
 

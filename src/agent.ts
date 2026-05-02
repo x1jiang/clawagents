@@ -16,6 +16,7 @@ import type { SandboxBackend } from "./sandbox/backend.js";
 import { LocalBackend } from "./sandbox/local.js";
 import type { Handoff } from "./handoffs.js";
 import type { RunContext } from "./run-context.js";
+import { appendPromptInjection, buildPromptInjection } from "./prompts/index.js";
 
 // ─── LangChain Tool Adapter ──────────────────────────────────────────────────
 
@@ -751,6 +752,8 @@ const DEFAULT_SKILL_DIRS = ["skills", ".skills", "skill", ".skill", "Skills"];
 /** Path to all bundled skills (byterover, openviking, etc.). */
 function getBundledSkillsDir(): string {
     const __dirname = dirname(fileURLToPath(import.meta.url));
+    const bundledInDist = resolve(__dirname, "skills");
+    if (existsSync(bundledInDist)) return bundledInDist;
     return resolve(__dirname, "..", "skills");
 }
 
@@ -792,26 +795,9 @@ function composeBeforeLLM(
     }
 
     if (!memoryContent && !skillSummaries) return null;
+    const injection = buildPromptInjection({ memoryContent, skillSummaries });
 
     return (messages: LLMMessage[]): LLMMessage[] => {
-        const injectParts: string[] = [];
-        if (memoryContent) injectParts.push(memoryContent);
-        if (skillSummaries) injectParts.push(skillSummaries);
-
-        if (injectParts.length > 0) {
-            const result = [...messages];
-            for (let i = 0; i < result.length; i++) {
-                if (result[i]!.role === "system") {
-                    result[i] = {
-                        role: "system",
-                        content: result[i]!.content + "\n\n" + injectParts.join("\n\n"),
-                    };
-                    break;
-                }
-            }
-            return result;
-        }
-
-        return messages;
+        return appendPromptInjection(messages, injection);
     };
 }

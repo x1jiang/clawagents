@@ -11,6 +11,7 @@
 import type { LLMProvider, LLMMessage } from "../providers/llm.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { OnEvent } from "./agent-loop.js";
+import { spawn } from "node:child_process";
 
 const COORDINATOR_SYSTEM_PROMPT = `\
 You are a Coordinator Agent. You plan and delegate tasks to Worker agents.
@@ -60,6 +61,15 @@ export interface CoordinatorState {
     finalResult: string;
 }
 
+export interface WorkerBackend {
+    run(
+        workerTask: WorkerTask,
+        llm: LLMProvider,
+        tools: ToolRegistry | undefined,
+        contextWindow: number,
+    ): Promise<WorkerTask>;
+}
+
 async function runWorker(
     workerTask: WorkerTask,
     llm: LLMProvider,
@@ -89,6 +99,99 @@ async function runWorker(
     return workerTask;
 }
 
+export class ForkedAgentWorkerBackend implements WorkerBackend {
+    async run(
+        workerTask: WorkerTask,
+        llm: LLMProvider,
+        tools: ToolRegistry | undefined,
+        contextWindow: number,
+    ): Promise<WorkerTask> {
+        return await runWorker(workerTask, llm, tools, contextWindow);
+    }
+}
+
+export class SubprocessWorkerBackend implements WorkerBackend {
+    public command: string[];
+    public timeoutMs: number;
+    public cwd?: string;
+    public env?: NodeJS.ProcessEnv;
+
+    constructor(
+        command: string[],
+        options: { timeoutMs?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {},
+    ) {
+        if (command.length === 0) throw new Error("SubprocessWorkerBackend requires a command");
+        this.command = [...command];
+        this.timeoutMs = options.timeoutMs ?? 120_000;
+        this.cwd = options.cwd;
+        this.env = options.env;
+    }
+
+    async run(
+        workerTask: WorkerTask,
+        _llm: LLMProvider,
+        _tools: ToolRegistry | undefined,
+        contextWindow: number,
+    ): Promise<WorkerTask> {
+        const started = Date.now();
+        const payload = JSON.stringify({
+            id: workerTask.id,
+            prompt: workerTask.prompt,
+            tools: workerTask.tools,
+            contextWindow,
+        });
+        workerTask.status = "running";
+
+        try {
+            const [program, ...args] = this.command;
+            const child = spawn(program!, args, {
+                cwd: this.cwd,
+                env: this.env ? { ...process.env, ...this.env } : process.env,
+                stdio: ["pipe", "pipe", "pipe"],
+            });
+            let stdout = "";
+            let stderr = "";
+            child.stdout.setEncoding("utf8");
+            child.stderr.setEncoding("utf8");
+            child.stdout.on("data", (chunk) => { stdout += chunk; });
+            child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+            const exitCode = await new Promise<number | null>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    child.kill();
+                    reject(new Error(`Worker subprocess timed out after ${this.timeoutMs}ms`));
+                }, this.timeoutMs);
+                child.on("error", (err) => {
+                    clearTimeout(timer);
+                    reject(err);
+                });
+                child.on("close", (code) => {
+                    clearTimeout(timer);
+                    resolve(code);
+                });
+                child.stdin.end(payload);
+            });
+
+            let parsed: Record<string, unknown>;
+            try {
+                parsed = stdout.trim() ? JSON.parse(stdout.trim()) as Record<string, unknown> : {};
+            } catch {
+                parsed = { status: exitCode === 0 ? "done" : "error", result: stdout.trim() };
+            }
+            const status = String(parsed.status ?? (exitCode === 0 ? "done" : "error"));
+            workerTask.status = status === "done" ? "done" : "error";
+            workerTask.result = String((parsed.result ?? stdout.trim()) || stderr.trim());
+            if (exitCode !== 0 && workerTask.status === "done") workerTask.status = "error";
+        } catch (err) {
+            workerTask.status = "error";
+            workerTask.result = `Worker subprocess error: ${err}`;
+        } finally {
+            workerTask.durationS = (Date.now() - started) / 1000;
+        }
+        return workerTask;
+    }
+}
+
 function parseCoordinatorResponse(content: string): Record<string, unknown> {
     const stripped = content.trim();
     try { return JSON.parse(stripped); } catch { /* fall through */ }
@@ -109,6 +212,7 @@ export async function runCoordinator(options: {
     maxRounds?: number;
     contextWindow?: number;
     onEvent?: OnEvent;
+    workerBackend?: WorkerBackend;
 }): Promise<CoordinatorState> {
     const envVal = process.env["CLAW_FEATURE_COORDINATOR"] ?? "0";
     if (!["1", "true", "yes", "on"].includes(envVal.toLowerCase())) {
@@ -119,6 +223,7 @@ export async function runCoordinator(options: {
     const maxRounds = options.maxRounds ?? 10;
     const contextWindow = options.contextWindow ?? 200_000;
     const emit = options.onEvent ?? (() => {});
+    const workerBackend = options.workerBackend ?? new ForkedAgentWorkerBackend();
 
     const state: CoordinatorState = {
         task: options.task,
@@ -176,7 +281,7 @@ export async function runCoordinator(options: {
             state.workers.push(...workerTasks);
             emit("context", { message: `Coordinator delegating ${workerTasks.length} tasks: ${workerTasks.map(t => t.id)}` });
 
-            await Promise.all(workerTasks.map(wt => runWorker(wt, options.llm, options.tools, contextWindow)));
+            await Promise.all(workerTasks.map(wt => workerBackend.run(wt, options.llm, options.tools, contextWindow)));
 
             const resultsText = workerTasks.map(wt => {
                 emit("tool_result", { name: `worker:${wt.id}`, success: wt.status === "done", preview: wt.result.slice(0, 120) });

@@ -26,6 +26,12 @@ export type {
     AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult,
     AgentLoopExtras, OnStreamEvent, ApprovalHandler, OutputTypeSpec,
 } from "./graph/agent-loop.js";
+export {
+    ForkedAgentWorkerBackend,
+    SubprocessWorkerBackend,
+    runCoordinator,
+} from "./graph/coordinator.js";
+export type { CoordinatorState, WorkerBackend, WorkerTask } from "./graph/coordinator.js";
 
 // ── openai-agents-python parity surfaces ─────────────────────────────
 export { RunContext, MAX_SUBAGENT_DEPTH } from "./run-context.js";
@@ -40,7 +46,7 @@ export { Usage, RequestUsage } from "./usage.js";
 export type {
     StreamEvent, TurnStartedEvent, AssistantTextEvent, AssistantDeltaEvent,
     ToolCallPlannedEvent, ToolStartedEvent, ToolResultEvent, UsageEvent,
-    GuardrailTrippedEvent, HandoffOccurredEvent, FinalOutputEvent, ErrorStreamEvent,
+    GuardrailTrippedEvent, CompactProgressEvent, HandoffOccurredEvent, FinalOutputEvent, ErrorStreamEvent,
     ApprovalRequiredEvent, GenericStreamEvent,
 } from "./stream-events.js";
 export { streamEventFromKind } from "./stream-events.js";
@@ -71,6 +77,13 @@ export { validateToolArgs, formatValidationErrors } from "./tools/validate.js";
 export type { ValidationResult, ValidationError } from "./tools/validate.js";
 export { createToolDiscoveryTools, namesForToolProfile } from "./tools/catalog.js";
 export type { ToolProfileName } from "./tools/catalog.js";
+export {
+    PROMPT_CACHE_BOUNDARY,
+    appendPromptInjection,
+    buildPromptInjection,
+    buildSystemPrompt,
+} from "./prompts/index.js";
+export type { PromptInjectionParts, PromptMessage, SystemPromptParts } from "./prompts/index.js";
 export { createComposeTool } from "./tools/compose.js";
 export type { ComposeToolConfig, CallTool, PipelineStep, StepBuilder } from "./tools/compose.js";
 export { createToolProgramTool } from "./tools/tool-program.js";
@@ -106,11 +119,38 @@ export { judgeRun } from "./trajectory/judge.js";
 export type { JudgeResult } from "./trajectory/judge.js";
 export { stripThinkingTokens } from "./providers/llm.js";
 export type { ContextEngine, ContextEngineConfig } from "./context/index.js";
-export { DefaultContextEngine, registerContextEngine, resolveContextEngine, listContextEngines } from "./context/index.js";
+export {
+    DefaultContextEngine,
+    registerContextEngine,
+    resolveContextEngine,
+    listContextEngines,
+    COMPACTION_CARRYOVER_KEY,
+    emptyCompactionCarryover,
+    formatCompactionCarryover,
+    getCompactionCarryover,
+    isCompactionCarryoverEmpty,
+    normalizeCompactionCarryover,
+    setCompactionCarryover,
+} from "./context/index.js";
+export type { ChannelCarryoverEntry, CompactionCarryover } from "./context/index.js";
 
 // Channels & WebSocket
-export type { ChannelMessage, ChannelAdapter, AgentFactory, ChannelRouterOptions } from "./channels/index.js";
-export { ChannelRouter, KeyedAsyncQueue } from "./channels/index.js";
+export type {
+    ChannelMessage,
+    ChannelAttachment,
+    ChannelCommand,
+    ChannelAdapter,
+    AgentFactory,
+    ChannelRouterOptions,
+} from "./channels/index.js";
+export {
+    ChannelRouter,
+    KeyedAsyncQueue,
+    channelMessageToAgentInput,
+    normalizeChannelAttachments,
+    normalizeChannelMessage,
+    parseChannelCommand,
+} from "./channels/index.js";
 export { TelegramAdapter } from "./channels/telegram.js";
 export { WhatsAppAdapter } from "./channels/whatsapp.js";
 export { SignalAdapter } from "./channels/signal.js";

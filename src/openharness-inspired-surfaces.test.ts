@@ -128,3 +128,100 @@ test("mcp auth tool updates config and reconnects", async () => {
     assert.equal(server.reconnected, 1);
 });
 
+test("compaction preserves carryover and emits progress events", async () => {
+    const { compactIfNeeded } = await import("./graph/agent-loop.js");
+    const { RunContext } = await import("./run-context.js");
+    const { setCompactionCarryover } = await import("./context/carryover.js");
+
+    const originalCwd = process.cwd();
+    const compactDir = mkdtempSync(join(tmpdir(), "claw-compact-"));
+    process.chdir(compactDir);
+    try {
+        const messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string }> = [
+            { role: "system", content: "system" },
+        ];
+        for (let i = 0; i < 24; i++) {
+            messages.push({ role: "user" as const, content: `history ${i} ${"x".repeat(500)}` });
+        }
+
+        const ctx = new RunContext();
+        setCompactionCarryover(ctx, {
+            taskFocus: "finish runtime continuity",
+            recentFiles: ["src/graph/agent-loop.ts"],
+            recentWorkLog: ["added failing tests"],
+            invokedSkills: ["autopilot"],
+            activeWorkers: ["worker-a"],
+            channelLog: [{ channelId: "telegram", conversationId: "chat-1", body: "/status now" }],
+            metadata: { release: "6.8" },
+        });
+
+        const events: Array<{ kind: string; data: Record<string, unknown> }> = [];
+        const compacted = await compactIfNeeded(
+            messages,
+            200,
+            { name: "fake", async chat() { return { content: "summarized old work", model: "fake", tokensUsed: 12 }; } },
+            (kind, data) => events.push({ kind, data }),
+            1.0,
+            undefined,
+            ctx,
+        );
+
+        const summary = compacted.find((m) => m.content.includes("Compacted History"))?.content ?? "";
+        assert.match(summary, /## Carryover State/);
+        assert.match(summary, /finish runtime continuity/);
+        assert.match(summary, /src\/graph\/agent-loop\.ts/);
+        assert.match(summary, /\/status now/);
+
+        const phases = events.filter((e) => e.kind === "compact_progress").map((e) => e.data.phase);
+        assert.equal(phases[0], "start");
+        assert.ok(phases.includes("end"));
+    } finally {
+        process.chdir(originalCwd);
+    }
+});
+
+test("subprocess worker backend runs headless JSON protocol", async () => {
+    const { SubprocessWorkerBackend } = await import("./graph/coordinator.js");
+    const script = [
+        "let input='';",
+        "process.stdin.on('data', c => input += c);",
+        "process.stdin.on('end', () => {",
+        " const payload = JSON.parse(input);",
+        " console.log(JSON.stringify({ status: 'done', result: 'subprocess:' + payload.id + ':' + payload.prompt }));",
+        "});",
+    ].join("");
+
+    const backend = new SubprocessWorkerBackend([process.execPath, "-e", script]);
+    const result = await backend.run(
+        { id: "task_1", prompt: "hello", tools: ["read_file"], status: "running", result: "", durationS: 0 },
+        undefined as any,
+        undefined,
+        123,
+    );
+
+    assert.equal(result.status, "done");
+    assert.equal(result.result, "subprocess:task_1:hello");
+    assert.ok(result.durationS >= 0);
+});
+
+test("channel messages parse commands and normalize attachments", async () => {
+    const { normalizeChannelMessage, channelMessageToAgentInput } = await import("./channels/index.js");
+
+    const msg = normalizeChannelMessage({
+        channelId: "telegram",
+        senderId: "u1",
+        conversationId: "chat-1",
+        body: "/deploy staging now",
+        timestamp: 1,
+        media: [{ url: "file:///tmp/log.txt", mimeType: "text/plain", filename: "log.txt" }],
+    });
+
+    assert.equal(msg.command?.name, "deploy");
+    assert.equal(msg.command?.args, "staging now");
+    assert.equal(msg.media?.[0]?.mimeType, "text/plain");
+
+    const prompt = channelMessageToAgentInput(msg);
+    assert.match(prompt, /\[Channel Command: deploy\]/);
+    assert.match(prompt, /staging now/);
+    assert.match(prompt, /log\.txt/);
+});
