@@ -168,6 +168,7 @@ async function buildBuiltinToolCatalog() {
     const { thinkTools } = await import("./tools/think.js");
     const { interactiveTools } = await import("./tools/interactive.js");
     const { createToolProgramTool } = await import("./tools/tool-program.js");
+    const { createBackgroundTaskTools } = await import("./tools/background-task.js");
 
     const sb = new LocalBackend();
     const registry = new ToolRegistry();
@@ -179,6 +180,7 @@ async function buildBuiltinToolCatalog() {
         ...createExecTools(sb),
         ...createAdvancedFsTools(sb),
         ...webTools.filter((t) => t.name === "web_fetch"),
+        ...createBackgroundTaskTools(),
     ]) {
         registry.register(tool);
     }
@@ -198,6 +200,21 @@ async function cmdTools(json = false) {
             .join(", ");
         process.stdout.write(`${tool.name}${params ? ` (${params})` : ""} — ${tool.description}\n`);
     }
+}
+
+async function cmdDryRun(task = "", profile?: string, json = false) {
+    const { buildDryRunPreview } = await import("./dry-run.js");
+    const preview = await buildDryRunPreview({ task, profile });
+    if (json) {
+        process.stdout.write(JSON.stringify(preview, null, 2) + "\n");
+        return;
+    }
+    process.stdout.write(`Dry run: ${preview.status}\n`);
+    process.stdout.write(`Provider: profile=${preview.provider.profile ?? "none"} provider=${preview.provider.provider} model=${preview.provider.model ?? ""}\n`);
+    process.stdout.write(`Auth: ${preview.provider.auth}  Base URL: ${preview.provider.baseUrl || "default"}\n`);
+    process.stdout.write(`Tools: ${preview.toolCount} inspectable\n`);
+    process.stdout.write(`Likely tools: ${preview.matchingTools.join(", ")}\n`);
+    process.stdout.write(`Next actions: ${preview.nextActions.join("; ")}\n`);
 }
 
 // ─── Trajectory Inspector ────────────────────────────────────────────────
@@ -280,6 +297,9 @@ async function main() {
         await cmdTools(args.includes("--json"));
         return;
     }
+
+    const profileIdx = args.indexOf("--profile");
+    const profile = profileIdx >= 0 && profileIdx + 1 < args.length ? args[profileIdx + 1] : undefined;
 
     const trajIdx = args.indexOf("--trajectory");
     if (trajIdx !== -1) {
@@ -388,12 +408,18 @@ async function main() {
         }
     }
 
+    if (args.includes("--dry-run")) {
+        await cmdDryRun(task, profile, args.includes("--json"));
+        return;
+    }
+
     if (task) {
         const banner = buildBanner();
         const config = loadConfig();
         const activeModel = getDefaultModel(config);
         const agent = await createClawAgent({
             model: activeModel,
+            profile,
             streaming: config.streaming,
             timeoutS,
             advisorModel: advisorModel ?? (config.advisorModel || undefined),
@@ -417,6 +443,7 @@ ClawAgents — lean, full-stack agentic AI framework
 
 Usage:
   clawagents --task "..."              Run a single task
+  clawagents --dry-run --task "..."    Preview runtime readiness without model/tool execution
   clawagents --doctor                  Check configuration health
   clawagents --tools [--json]          Inspect built-in tool schemas
   clawagents --trajectory [N]          Show last N run summaries (default: 1)
@@ -431,6 +458,7 @@ Options:
   --quiet, -q         Quiet mode (suppress banner)
   --timeout N         Global timeout in seconds (0 = no limit)
   --advisor MODEL     Stronger model for strategic guidance (e.g. gpt-5.4, claude-opus-4-6)
+  --profile NAME      Named provider profile (e.g. openai, gemini, anthropic, ollama)
 
 Quick start:
   npm install clawagents

@@ -26,6 +26,24 @@ export enum PermissionMode {
     BYPASS = "bypassPermissions",
 }
 
+export interface PermissionDecision {
+    allowed: boolean;
+    requiresConfirmation: boolean;
+    reason: string;
+}
+
+export const SENSITIVE_PATH_PATTERNS: readonly string[] = [
+    "*/.ssh/*",
+    "*/.aws/credentials",
+    "*/.aws/config",
+    "*/.config/gcloud/*",
+    "*/.azure/*",
+    "*/.gnupg/*",
+    "*/.docker/config.json",
+    "*/.kube/config",
+    "*/.clawagents/credentials.json",
+];
+
 /**
  * Tools whose execution mutates state (filesystem, processes, network
  * side effects). Listed by canonical tool name. The registry consults
@@ -53,6 +71,76 @@ export const WRITE_CLASS_TOOLS: ReadonlySet<string> = new Set([
 
 export function isWriteClassTool(toolName: string): boolean {
     return WRITE_CLASS_TOOLS.has(toolName);
+}
+
+export function evaluateToolPermission(
+    toolName: string,
+    opts: {
+        mode?: PermissionMode;
+        isReadOnly?: boolean;
+        filePath?: string;
+        command?: string;
+    } = {},
+): PermissionDecision {
+    const mode = opts.mode ?? PermissionMode.DEFAULT;
+    if (opts.filePath) {
+        for (const candidate of policyMatchPaths(opts.filePath)) {
+            for (const pattern of SENSITIVE_PATH_PATTERNS) {
+                if (globMatch(candidate, pattern)) {
+                    return {
+                        allowed: false,
+                        requiresConfirmation: false,
+                        reason: `Access denied: ${opts.filePath} is a sensitive credential path (matched built-in pattern '${pattern}')`,
+                    };
+                }
+            }
+        }
+    }
+    if (mode === PermissionMode.BYPASS) {
+        return { allowed: true, requiresConfirmation: false, reason: "bypassPermissions allows this tool" };
+    }
+    if (opts.isReadOnly) {
+        return { allowed: true, requiresConfirmation: false, reason: "read-only tools are allowed" };
+    }
+    if (mode === PermissionMode.PLAN && isWriteClassTool(toolName)) {
+        return { allowed: false, requiresConfirmation: false, reason: "Plan mode blocks mutating tools until exit_plan_mode" };
+    }
+    if (mode === PermissionMode.ACCEPT_EDITS && isWriteClassTool(toolName)) {
+        return { allowed: true, requiresConfirmation: false, reason: "acceptEdits allows write-class tools" };
+    }
+    const hint = commandPermissionHint(opts.command);
+    return {
+        allowed: false,
+        requiresConfirmation: true,
+        reason: `Mutating tools require user confirmation in default mode.${hint ? ` ${hint}` : ""}`,
+    };
+}
+
+function policyMatchPaths(filePath: string): string[] {
+    const normalized = filePath.replace(/\/+$/, "");
+    return normalized ? [normalized, `${normalized}/`] : [filePath];
+}
+
+function globMatch(value: string, pattern: string): boolean {
+    const escaped = pattern
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".");
+    return new RegExp(`^${escaped}$`).test(value);
+}
+
+function commandPermissionHint(command?: string): string {
+    if (!command) return "";
+    const lowered = command.toLowerCase();
+    const markers = [
+        "npm install", "pnpm install", "yarn install", "bun install",
+        "pip install", "uv pip install", "poetry install", "cargo install",
+        "create-next-app", "npm create ", "pnpm create ", "yarn create ",
+        "bun create ", "npx create-", "npm init ", "pnpm init ", "yarn init ",
+    ];
+    return markers.some((marker) => lowered.includes(marker))
+        ? "Package installation and scaffolding commands change the workspace."
+        : "";
 }
 
 /**

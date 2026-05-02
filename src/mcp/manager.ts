@@ -106,6 +106,56 @@ export class MCPServerManager {
         );
     }
 
+    public getServerConfig(serverName: string): unknown {
+        const server = this.servers.find((candidate) => candidate.name === serverName) as any;
+        if (!server) throw new Error(`No MCP server registered with name '${serverName}'`);
+        return server.params;
+    }
+
+    public updateServerConfig(serverName: string, config: unknown): void {
+        const server = this.servers.find((candidate) => candidate.name === serverName) as any;
+        if (!server) throw new Error(`No MCP server registered with name '${serverName}'`);
+        if (!("params" in server)) throw new Error(`MCP server '${serverName}' does not expose mutable params`);
+        server.params = config;
+    }
+
+    public async reconnectAll(): Promise<void> {
+        await this.shutdown();
+        for (const server of this.servers) {
+            await server.connect();
+            this._connectedServers.add(server);
+        }
+        this._started = true;
+    }
+
+    public async updateServerAuth(
+        serverName: string,
+        opts: { mode: string; value: string; key?: string; reconnect?: boolean },
+    ): Promise<unknown> {
+        const config = this.getServerConfig(serverName);
+        if (!config || typeof config !== "object") {
+            throw new Error(`MCP server '${serverName}' params are not mutable object config`);
+        }
+        const updated: any = { ...(config as Record<string, unknown>) };
+        if (opts.mode === "env") {
+            const envKey = opts.key ?? "MCP_AUTH_TOKEN";
+            updated.env = { ...(updated.env ?? {}), [envKey]: opts.value };
+        } else if (opts.mode === "bearer" || opts.mode === "header") {
+            const headerKey = opts.key ?? "Authorization";
+            updated.headers = {
+                ...(updated.headers ?? {}),
+                [headerKey]: opts.mode === "bearer" && headerKey.toLowerCase() === "authorization"
+                    ? `Bearer ${opts.value}`
+                    : opts.value,
+            };
+        } else {
+            throw new Error("mode must be bearer, header, or env");
+        }
+        this.updateServerConfig(serverName, updated);
+        if (opts.reconnect ?? true) await this.reconnectAll();
+        return updated;
+    }
+
     public async listAllTools(): Promise<Record<string, any[]>> {
         const out: Record<string, any[]> = {};
         for (const server of this.servers) {

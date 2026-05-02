@@ -7,7 +7,10 @@
 
 export {
     PermissionMode,
+    SENSITIVE_PATH_PATTERNS,
     WRITE_CLASS_TOOLS,
+    evaluateToolPermission,
     isWriteClassTool,
     permissionModeFromString,
 } from "./mode.js";
+export type { PermissionDecision } from "./mode.js";

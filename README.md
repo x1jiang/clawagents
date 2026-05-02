@@ -1,17 +1,27 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.7.1**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.8.0**
 
-> **v6.7.1 (April 2026)** — Tool discovery and compact-agent recovery release.
-> Compact tool-universe discovery is now registered by default, and lookup
-> scores tool names, descriptions, and keyword metadata so small models can
-> recover even when a tool name is imperfect. Failed native-tool observations
-> preserve structured output; `execute` returns command/exit/stdout/stderr
-> details on nonzero exits; repeated identical failures get a repair hint
-> instead of silently burning turns. This release keeps the v6.7.0 security
-> hardening and adds focused Python/TypeScript regression coverage for the new
-> recovery path.
+> **v6.8.0 (May 2026)** — OpenHarness-inspired operational surfaces release.
+> Adds static `--dry-run` readiness previews, named provider profiles
+> (`--profile ollama/openai/gemini/anthropic`), structured permission decisions,
+> first-class background task tools, metadata-only plugin compatibility loading,
+> and an MCP auth/reconnect helper. This release keeps v6.7.1 compact
+> tool-discovery recovery and v6.7.0 security hardening, with full
+> Python/TypeScript regression suites passing.
 > See [Changelog](#changelog).
+
+### New In v6.8.0
+
+```bash
+npx tsx src/cli.ts --dry-run --profile ollama --task "inspect this repo"
+```
+
+- **Dry-run previews** report provider resolution, auth readiness, inspectable tools, likely matching tools, and next actions without calling an LLM or executing tools.
+- **Provider profiles** give stable aliases for common backends while still letting explicit `createClawAgent()` parameters override profile values.
+- **Background task tools** expose long-running command management (`task_create`, `task_status`, `task_output`, `task_stop`, `task_list`) through the normal tool registry.
+- **Plugin compatibility loading** reads `plugin.json` / `.claude-plugin/plugin.json` metadata, skills, commands, hooks, and MCP server declarations without executing plugin code.
+- **MCP auth refresh** lets agents update MCP server auth material and reconnect configured servers deliberately.
 
 ## Installation
 
@@ -755,15 +765,16 @@ All environment variables are **optional**. They serve as defaults when the corr
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.7.1 (TypeScript)** against three peer agent frameworks:
+> Compares **ClawAgents v6.8.0 (TypeScript)** against three peer agent frameworks:
 > **Hermes Agent** ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)),
 > **DeepAgents** ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)),
 > and **OpenClaw**.
 > The v6.5 hardening work, v6.6 Hermes-parity areas, v6.7.0 security fixes,
-> and v6.7.1 compact tool-discovery recovery now ship together in the current
+> v6.7.1 compact tool-discovery recovery, and v6.8.0 OpenHarness-inspired
+> operational surfaces now ship together in the current
 > release — every row in the ClawAgents column is ✅.
 
-| Feature | ClawAgents v6.7.1 | Hermes Agent | DeepAgents | OpenClaw |
+| Feature | ClawAgents v6.8.0 | Hermes Agent | DeepAgents | OpenClaw |
 |:---|:---:|:---:|:---:|:---:|
 | **Core** | | | | |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ |
@@ -856,6 +867,34 @@ All environment variables are **optional**. They serve as defaults when the corr
 ---
 
 ## Changelog
+
+### v6.8.0 — OpenHarness-inspired operational surfaces (May 2026)
+
+Minor release focused on making ClawAgents easier to inspect, configure,
+recover, and integrate without changing the core agent loop contract.
+
+- **Static readiness previews** — `--dry-run --profile <name> --task "<prompt>"`
+  reports resolved provider settings, auth readiness, inspectable tools,
+  likely matching tools, and next actions without calling a model or executing
+  tools.
+- **Named provider profiles** — built-in `openai`, `gemini`, `anthropic`, and
+  `ollama` profiles plus project/user profile files give stable provider
+  aliases. Explicit factory parameters still take precedence.
+- **Structured permission decisions** — permission evaluation now returns a
+  reusable decision object with allow/confirmation/reason fields and feeds the
+  registry hard-block path for plan-mode and sensitive-path decisions.
+- **Background task tools** — the registry can expose task create/status/output
+  /stop/list tools backed by the existing background job manager, so long-running
+  work can be tracked instead of blocking an agent turn.
+- **Plugin compatibility loader** — metadata-only loading for `plugin.json` and
+  `.claude-plugin/plugin.json` reads plugin manifests, markdown skills/commands,
+  hooks, and MCP server declarations without executing arbitrary plugin code.
+- **MCP auth/reconnect helper** — MCP manager configs can be updated with new
+  environment/header auth material and reconnected deliberately.
+
+Release verification: **TypeScript 520 passed, 4 skipped**, `tsc --noEmit`,
+build, and dry-run smoke; Python sibling: **844 passed, 3 skipped** plus
+bytecode compilation and matching dry-run smoke.
 
 ### v6.7.1 — Tool discovery and compact-agent recovery (April 2026)
 
@@ -1527,7 +1566,10 @@ isolation), `src/paths.test.ts` (`displayClawagentsHome()`),
 `src/transport.test.ts`, `src/aux-models.test.ts`, `src/background.test.ts`,
 `src/steer.test.ts`, `src/mcp/env-scrub.test.ts`, plus the four v6.6 feature
 suites (`src/browser/browser.test.ts`, `src/cron/cron.test.ts`,
-`src/acp/acp.test.ts`, `src/rl/rl.test.ts`). Current v6.7.1 coverage adds
+`src/acp/acp.test.ts`, `src/rl/rl.test.ts`). Current v6.8.0 coverage adds
+`src/openharness-inspired-surfaces.test.ts` for dry-run previews, provider
+profiles, structured permission decisions, background task tools, plugin
+metadata compatibility loading, and MCP auth/reconnect helpers. v6.7.1 added
 `src/infra-improvements.test.ts` for compact tool discovery, structured tool
 failure observations, recovery hints, and infrastructure behavior, alongside
 the existing `web.test.ts` / `simulated.test.ts` parity sweep.

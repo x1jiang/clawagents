@@ -396,11 +396,18 @@ export class ToolRegistry {
         // mode. Kept at the registry level (not in agent-loop) so all
         // execution paths see the same gate, including parallel dispatch.
         if (runContext) {
-            const { PermissionMode, isWriteClassTool } = await import("../permissions/mode.js");
-            if (
-                runContext.permissionMode === PermissionMode.PLAN &&
-                isWriteClassTool(toolName)
-            ) {
+            const { evaluateToolPermission } = await import("../permissions/mode.js");
+            const filePath =
+                typeof args.path === "string" ? args.path :
+                    typeof args.filePath === "string" ? args.filePath :
+                        typeof args.file_path === "string" ? args.file_path :
+                            undefined;
+            const decision = evaluateToolPermission(toolName, {
+                mode: runContext.permissionMode,
+                filePath,
+                command: typeof args.command === "string" ? args.command : undefined,
+            });
+            if (!decision.allowed && !decision.requiresConfirmation) {
                 return {
                     success: false,
                     output: "",

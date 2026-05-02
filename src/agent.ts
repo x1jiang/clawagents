@@ -384,6 +384,7 @@ export class ClawAgent {
  */
 export async function createClawAgent({
     model,
+    profile,
     apiKey,
     baseUrl,
     apiVersion,
@@ -448,6 +449,8 @@ export async function createClawAgent({
     advisorApiKey?: string;
     /** Max advisor consultations per task (default: 3). */
     advisorMaxCalls?: number;
+    /** Optional named provider profile. Explicit model/apiKey/baseUrl args override profile values. */
+    profile?: string;
     /**
      * Optional list of MCP (Model Context Protocol) servers. Each server is
      * connected, its tools are discovered and bridged into the ToolRegistry,
@@ -483,6 +486,21 @@ export async function createClawAgent({
     const resolvedPreviewChars = previewChars ?? envInt("CLAW_PREVIEW_CHARS", 120);
     const resolvedResponseChars = responseChars ?? envInt("CLAW_RESPONSE_CHARS", 500);
     const resolvedTimeoutS = timeoutS ?? envInt("CLAW_TIMEOUT", 0);
+
+    // ── Resolve optional provider profile before model construction ──
+    if (profile) {
+        const { resolveProviderProfile } = await import("./provider-profiles.js");
+        const resolvedProfile = resolveProviderProfile(profile, {
+            model: typeof model === "string" ? model : undefined,
+            apiKey,
+            baseUrl,
+            apiVersion,
+        });
+        if (typeof model === "string" || model === undefined) model = resolvedProfile.model;
+        apiKey = resolvedProfile.apiKey;
+        baseUrl = resolvedProfile.baseUrl;
+        apiVersion = resolvedProfile.apiVersion;
+    }
 
     // ── Resolve model → LLMProvider ──────────────────────────────────
     let llm: LLMProvider = await resolveModel(model, streaming, apiKey, contextWindow, maxTokens, temperature, baseUrl, apiVersion);
@@ -631,6 +649,11 @@ export async function createClawAgent({
         handoffs, name,
     );
 
+    const { createBackgroundTaskTools } = await import("./tools/background-task.js");
+    for (const taskTool of createBackgroundTaskTools()) {
+        registry.register(taskTool);
+    }
+
     const { createToolProgramTool } = await import("./tools/tool-program.js");
     registry.register(createToolProgramTool(registry));
 
@@ -652,6 +675,8 @@ export async function createClawAgent({
         await manager.start(registry);
         // Expose the manager so callers can shutdown explicitly.
         (agent as unknown as { mcpManager?: unknown }).mcpManager = manager;
+        const { createMcpAuthTool } = await import("./tools/mcp-auth.js");
+        registry.register(createMcpAuthTool(manager));
     }
 
     // Compact discovery is registered last so it can see user, subagent, and MCP tools.

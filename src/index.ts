@@ -12,6 +12,16 @@
 
 // Re-export public API
 export { createClawAgent, ClawAgent, LangChainToolAdapter } from "./agent.js";
+export {
+    BUILTIN_PROVIDER_PROFILES,
+    loadProviderProfiles,
+    resolveProviderProfile,
+} from "./provider-profiles.js";
+export type { ProviderProfile, ResolvedProviderProfile } from "./provider-profiles.js";
+export { buildDryRunPreview } from "./dry-run.js";
+export type { DryRunPreview } from "./dry-run.js";
+export { loadPlugin, discoverPlugins } from "./plugin-compat.js";
+export type { LoadedCompatPlugin, PluginSkill, PluginCommand } from "./plugin-compat.js";
 export type {
     AgentState, OnEvent, EventKind, BeforeLLMHook, BeforeToolHook, AfterToolHook, HookResult,
     AgentLoopExtras, OnStreamEvent, ApprovalHandler, OutputTypeSpec,
@@ -190,8 +200,11 @@ export type {
 // ── Exec Safety v2 (v6.4) ────────────────────────────────────────────
 export {
     PermissionMode, WRITE_CLASS_TOOLS,
+    SENSITIVE_PATH_PATTERNS,
+    evaluateToolPermission,
     isWriteClassTool, permissionModeFromString,
 } from "./permissions/mode.js";
+export type { PermissionDecision as ToolPermissionDecision } from "./permissions/mode.js";
 export {
     CommandCategory, Decision, validateBash,
 } from "./tools/bash-validator.js";
@@ -201,6 +214,8 @@ export type { ObfuscationFinding } from "./tools/exec-obfuscation.js";
 export {
     enterPlanModeTool, exitPlanModeTool, createPlanModeTools,
 } from "./tools/plan-mode.js";
+export { createBackgroundTaskTools } from "./tools/background-task.js";
+export { createMcpAuthTool } from "./tools/mcp-auth.js";
 
 // ── MCP (Model Context Protocol) integration (v6.4) ──────────────────
 // The optional ``@modelcontextprotocol/sdk`` package is loaded lazily —
