@@ -408,15 +408,29 @@ async function main() {
         }
     }
 
+    let outputFormat: "text" | "json" | "stream-json" = "text";
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--output-format" && i + 1 < args.length) {
+            outputFormat = args[i + 1] as typeof outputFormat;
+            break;
+        } else if (args[i]?.startsWith("--output-format=")) {
+            outputFormat = args[i]!.substring(16) as typeof outputFormat;
+            break;
+        }
+    }
+
     if (args.includes("--dry-run")) {
         await cmdDryRun(task, profile, args.includes("--json"));
         return;
     }
 
     if (task) {
+        const { parseOutputFormat, printAgentOutput, makeStreamJsonEmitter } = await import("./output-format.js");
+        const fmt = parseOutputFormat(outputFormat);
         const banner = buildBanner();
         const config = loadConfig();
         const activeModel = getDefaultModel(config);
+        const onEvent = fmt === "stream-json" ? makeStreamJsonEmitter() : undefined;
         const agent = await createClawAgent({
             model: activeModel,
             profile,
@@ -425,9 +439,10 @@ async function main() {
             advisorModel: advisorModel ?? (config.advisorModel || undefined),
         });
         const toolCount = agent.tools.list().length;
-        if (!quiet) process.stderr.write(`${banner} | ${toolCount} tools\n`);
+        if (!quiet && fmt === "text") process.stderr.write(`${banner} | ${toolCount} tools\n`);
         if (verbose) process.stderr.write(`[verbose] timeout=${timeoutS}s model=${activeModel}${agent.advisorLLM ? ` advisor=${advisorModel || config.advisorModel}` : ""}\n`);
-        await agent.invoke(task);
+        const result = await agent.invoke(task, undefined, onEvent, timeoutS);
+        printAgentOutput(result, fmt);
         process.exit(0);
     }
 
@@ -457,6 +472,7 @@ Options:
   --verbose, -v       Verbose output
   --quiet, -q         Quiet mode (suppress banner)
   --timeout N         Global timeout in seconds (0 = no limit)
+  --output-format F   Output format for --task: text | json | stream-json
   --advisor MODEL     Stronger model for strategic guidance (e.g. gpt-5.4, claude-opus-4-6)
   --profile NAME      Named provider profile (e.g. openai, gemini, anthropic, ollama)
 

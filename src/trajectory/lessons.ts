@@ -17,6 +17,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { createHash } from "node:crypto";
 import type { LLMProvider, LLMMessage } from "../providers/llm.js";
 import type { RunSummary, TurnRecord } from "./recorder.js";
 
@@ -281,6 +282,33 @@ export function exportLessons(outputPath?: string): string {
     };
     writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
     return path;
+}
+
+/** Normalize a lesson bullet for deduplication keys. */
+export function normalizeLesson(text: string): string {
+    return text.trim().replace(/^-\s*/, "").toLowerCase().replace(/\s+/g, " ");
+}
+
+export function lessonKey(text: string): string {
+    return createHash("sha256").update(normalizeLesson(text)).digest("hex").slice(0, 16);
+}
+
+export function parseLessonBullets(markdown: string): string[] {
+    const bullets: string[] = [];
+    for (const line of markdown.split("\n")) {
+        const stripped = line.trim();
+        if (stripped.startsWith("- ")) {
+            const body = stripped.slice(2).trim();
+            if (body) bullets.push(body);
+        }
+    }
+    return bullets;
+}
+
+export function slugifyLessonName(text: string): string {
+    const words = normalizeLesson(text).replace(/[^a-z0-9\s-]/g, "").split(/\s+/).slice(0, 5);
+    const slug = words.join("-").slice(0, 48).replace(/^-+|-+$/g, "");
+    return slug || "recurring-lesson";
 }
 
 export function importLessons(inputPath: string): boolean {

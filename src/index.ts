@@ -20,6 +20,47 @@ export {
 export type { ProviderProfile, ResolvedProviderProfile } from "./provider-profiles.js";
 export { buildDryRunPreview } from "./dry-run.js";
 export type { DryRunPreview } from "./dry-run.js";
+export {
+    BUILTIN_HARNESS_PROFILES,
+    loadHarnessProfiles,
+    resolveHarnessProfile,
+    applyHarnessProfileToPrompt,
+} from "./harness-profiles.js";
+export type { HarnessProfile } from "./harness-profiles.js";
+export {
+    DEFAULT_KNOWN_POLL_TOOLS,
+    detectKnownPollNoProgress,
+    getNoProgressStreak,
+    hashToolCall,
+    isKnownPollToolCall,
+    resolveLoopDetectionConfig,
+} from "./loop-detection.js";
+export type {
+    LoopDetectionConfig,
+    LoopDetectionDetectors,
+    LoopDetectionResult,
+    LoopDetector,
+    LoopLevel,
+    PollHistoryEntry,
+} from "./loop-detection.js";
+export { offloadToolOutputIfNeeded, toolArtifactDir } from "./tool-output-artifacts.js";
+export { compactToolResults } from "./memory/compact-tool-results.js";
+export { SkillWorkshopService } from "./skills/workshop/index.js";
+export type { ProposalStatus, SkillProposalRecord } from "./skills/workshop/index.js";
+export { createSkillWorkshopTool } from "./tools/skill-workshop.js";
+export {
+    ensureFts5,
+    formatSearchHits,
+    rebuildFts5,
+    searchSessionMessages,
+} from "./session/search.js";
+export type { SessionSearchHit } from "./session/search.js";
+export {
+    AutopilotPhase,
+    AutopilotRegistry,
+    DEFAULT_AUTOPILOT_REGISTRY,
+} from "./autopilot/index.js";
+export type { AutopilotRunner, AutopilotTask } from "./autopilot/index.js";
 export { loadPlugin, discoverPlugins } from "./plugin-compat.js";
 export type { LoadedCompatPlugin, PluginSkill, PluginCommand } from "./plugin-compat.js";
 export type {

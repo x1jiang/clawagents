@@ -48,6 +48,15 @@ import {
     getCompactionCarryover,
 } from "../context/carryover.js";
 import { buildSystemPrompt } from "../prompts/index.js";
+import { compactToolResults } from "../memory/compact-tool-results.js";
+import { offloadToolOutputIfNeeded } from "../tool-output-artifacts.js";
+import {
+    detectKnownPollNoProgress,
+    hashToolCall,
+    type LoopDetectionConfig,
+    type LoopDetectionResult,
+    type PollHistoryEntry,
+} from "../loop-detection.js";
 
 // ─── Model Control Token Sanitization ─────────────────────────────────────
 // Strip leaked model control tokens from assistant text (GLM-5, DeepSeek, etc.)
@@ -476,6 +485,8 @@ export function stableStringify(obj: unknown): string {
 
 export class ToolCallTracker {
     private history: string[] = [];
+    private pollHistory: PollHistoryEntry[] = [];
+    private pollWarnings = new Set<string>();
     private resultHashes = new Map<string, string>();
     private noProgressCount = 0;
     private softWarnings = 0;
@@ -485,6 +496,7 @@ export class ToolCallTracker {
         private softLimit = 3,
         private hardLimit = 6,
         private circuitBreakerLimit = 30,
+        private loopConfig?: LoopDetectionConfig,
     ) { }
 
     private hashResult(output: string): string {
@@ -512,6 +524,28 @@ export class ToolCallTracker {
             this.noProgressCount = Math.max(0, this.noProgressCount - 1);
         }
         this.resultHashes.set(key, resultHash);
+        const callHash = hashToolCall(toolName, args);
+        this.pollHistory.push([toolName, callHash, resultHash]);
+        if (this.pollHistory.length > this.windowSize) this.pollHistory.shift();
+    }
+
+    checkKnownPollNoProgress(
+        toolName: string,
+        args: Record<string, unknown>,
+    ): LoopDetectionResult | null {
+        const result = detectKnownPollNoProgress({
+            toolName,
+            params: args,
+            history: this.pollHistory,
+            config: this.loopConfig,
+        });
+        if (result?.stuck && result.warningKey && this.pollWarnings.has(result.warningKey)) {
+            if (result.level === "warning") return null;
+        }
+        if (result?.stuck && result.warningKey) {
+            this.pollWarnings.add(result.warningKey);
+        }
+        return result;
     }
 
     /** Detect A→B→A→B ping-pong oscillation (last 6 entries). */
@@ -995,6 +1029,15 @@ export async function compactIfNeeded(
         ? resolveContextBudget(modelName, contextWindow)
         : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
     const budget = Math.floor(effectiveWindow * ratio);
+    const [compactedMsgs, toolResultsCompacted] = compactToolResults(messages, {
+        maxInputTokens: budget,
+        tokenMultiplier,
+    });
+    if (toolResultsCompacted) {
+        emit("context", { message: "compacted oversized tool results before summarization" });
+    }
+    messages = compactedMsgs;
+
     const currentTokens = estimateMessagesTokens(messages, tokenMultiplier);
 
     if (currentTokens <= budget) return messages;
@@ -2047,6 +2090,19 @@ export async function runAgentGraph<TContext = unknown>(
                 break;
             }
 
+            let pollHit: LoopDetectionResult | null = null;
+            for (const call of toolCalls) {
+                pollHit = loopTracker.checkKnownPollNoProgress(call.toolName, call.args);
+                if (pollHit?.stuck && pollHit.level === "critical") break;
+            }
+            if (pollHit?.stuck && pollHit.level === "critical") {
+                emit("warn", { message: pollHit.message ?? "known poll loop" });
+                state.status = "done";
+                state.result = pollHit.message ?? "Known poll loop detected. Stopping.";
+                state.iterations += 1;
+                break;
+            }
+
             if (loopTracker.isHardLoopingBatch(toolCalls)) {
                 const names = toolCalls.map((c) => c.toolName).join(", ");
                 emit("warn", { message: `tool loop detected (${names}) — breaking` });
@@ -2233,6 +2289,15 @@ export async function runAgentGraph<TContext = unknown>(
                     preview = "[Multimodal Array Content]";
                 } else {
                     toolOutput = evictLargeToolResult(call.toolName, rawOutput);
+                    const [inline, artifactPath] = offloadToolOutputIfNeeded({
+                        toolName: call.toolName,
+                        toolUseId: nativeTc?.toolCallId ?? call.toolName,
+                        output: toolOutput,
+                    });
+                    toolOutput = inline;
+                    if (artifactPath) {
+                        emit("context", { message: `tool output offloaded to ${artifactPath}` });
+                    }
                     preview = toolOutput.slice(0, previewChars);
                 }
 
@@ -2482,6 +2547,15 @@ export async function runAgentGraph<TContext = unknown>(
                         preview = "[Multimodal Array Content]";
                     } else {
                         output = evictLargeToolResult(call.toolName, rawOut);
+                        const [inline, artifactPath] = offloadToolOutputIfNeeded({
+                            toolName: call.toolName,
+                            toolUseId: call.toolName,
+                            output,
+                        });
+                        output = inline;
+                        if (artifactPath) {
+                            emit("context", { message: `tool output offloaded to ${artifactPath}` });
+                        }
                         preview = output.slice(0, previewChars);
                     }
                     emit("tool_result", {
@@ -2664,6 +2738,15 @@ export async function runAgentGraph<TContext = unknown>(
                 if (lessonsText) {
                     saveLessons(lessonsText, runSummary.task, runSummary.outcome, runSummary.model);
                     emit("context", { message: "PTRL: extracted and saved lessons from this run" });
+                    try {
+                        const { maybePromoteRecurringLessons } = await import("../trajectory/lesson-promotion.js");
+                        const promoted = maybePromoteRecurringLessons(lessonsText, { task: runSummary.task });
+                        if (promoted.length) {
+                            emit("context", {
+                                message: `PTRL: promoted ${promoted.length} recurring lesson(s) to skill_workshop`,
+                            });
+                        }
+                    } catch { /* best effort */ }
                 }
             } else {
                 emit("context", {

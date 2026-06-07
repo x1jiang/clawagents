@@ -27,6 +27,7 @@ import {
 import { dirname, resolve } from "node:path";
 
 import type { LLMMessage } from "../providers/llm.js";
+import { ensureFts5, searchSessionMessages } from "./search.js";
 
 export interface Session {
     readonly sessionId: string;
@@ -185,6 +186,7 @@ export class SqliteSession implements Session {
             this.db
                 .prepare("INSERT OR IGNORE INTO sessions(session_id) VALUES (?)")
                 .run(this.sessionId);
+            ensureFts5(this.db);
         } catch (err) {
             throw new Error(
                 `SqliteSession requires node:sqlite (Node 22+ with --experimental-sqlite). ` +
@@ -222,15 +224,9 @@ export class SqliteSession implements Session {
         const insert = this.db.prepare(
             "INSERT INTO messages(session_id, ord, payload) VALUES (?, ?, ?)",
         );
-        const tx = this.db.transaction((rows: Array<[string, number, string]>) => {
-            for (const r of rows) insert.run(...r);
-        });
-        const payload: Array<[string, number, string]> = arr.map((m, i) => [
-            this.sessionId,
-            nextOrd + i,
-            JSON.stringify(cloneMessage(m)),
-        ]);
-        tx(payload);
+        for (let i = 0; i < arr.length; i++) {
+            insert.run(this.sessionId, nextOrd + i, JSON.stringify(cloneMessage(arr[i]!)));
+        }
     }
 
     async popItem(): Promise<LLMMessage | null> {
@@ -250,6 +246,37 @@ export class SqliteSession implements Session {
         this.db
             .prepare("DELETE FROM messages WHERE session_id = ?")
             .run(this.sessionId);
+    }
+
+    /** FTS5 full-text search over session messages. */
+    async search(query: string, opts: { limit?: number } = {}): Promise<Array<{
+        messageId: number;
+        ord: number;
+        role: string;
+        snippet: string;
+        rank: number;
+    }>> {
+        await this.ready;
+        const hits = searchSessionMessages(this.db, this.sessionId, query, opts);
+        return hits.map((h) => ({
+            messageId: h.messageId,
+            ord: h.ord,
+            role: h.role,
+            snippet: h.snippet,
+            rank: h.rank,
+        }));
+    }
+
+    /** Pop the last *count* messages (Hermes /undo). */
+    async undoLast(count = 1): Promise<LLMMessage[]> {
+        const removed: LLMMessage[] = [];
+        for (let i = 0; i < Math.max(1, count); i++) {
+            const item = await this.popItem();
+            if (!item) break;
+            removed.push(item);
+        }
+        removed.reverse();
+        return removed;
     }
 
     /** Close the underlying database. Safe to call more than once. */

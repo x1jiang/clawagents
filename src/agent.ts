@@ -662,6 +662,13 @@ export async function createClawAgent({
     const { createTaskTool } = await import("./tools/subagent.js");
     registry.register(createTaskTool(llm, registry));
 
+    // ── Skill workshop (always available) ───────────────────────────
+    const { createSkillWorkshopTool } = await import("./tools/skill-workshop.js");
+    registry.register(createSkillWorkshopTool(process.cwd()));
+
+    const { createSearchHistoryTool } = await import("./tools/search-history.js");
+    registry.register(createSearchHistoryTool(process.cwd()));
+
     // ── MCP server integration (v6.4, optional) ──────────────────────
     if (mcpServers && mcpServers.length > 0) {
         const { isMCPSdkAvailable, MCPServerManager } = await import("./mcp/index.js");

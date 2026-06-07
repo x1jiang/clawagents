@@ -101,6 +101,8 @@ export const COMMAND_REGISTRY: CommandDef[] = [
       category: "Session" },
     { name: "undo", description: "Remove the last user/assistant exchange",
       category: "Session", cacheImpact: "immediate" },
+    { name: "search", description: "Full-text search session history (SQLite sessions)",
+      category: "Session", argsHint: "<query>", cliOnly: true },
     { name: "title", description: "Set a title for the current session",
       category: "Session", argsHint: "[name]" },
     // /compress rewrites history → cache must invalidate.

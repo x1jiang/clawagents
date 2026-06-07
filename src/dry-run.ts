@@ -1,3 +1,7 @@
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+
 import { LocalBackend } from "./sandbox/local.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { createFilesystemTools } from "./tools/filesystem.js";
@@ -10,6 +14,7 @@ import { interactiveTools } from "./tools/interactive.js";
 import { createToolDiscoveryTools } from "./tools/catalog.js";
 import { createBackgroundTaskTools } from "./tools/background-task.js";
 import { resolveProviderProfile } from "./provider-profiles.js";
+import { resolveHarnessProfile } from "./harness-profiles.js";
 
 export interface DryRunPreview {
     dryRun: true;
@@ -26,6 +31,10 @@ export interface DryRunPreview {
     toolCount: number;
     matchingTools: string[];
     nextActions: string[];
+    skillsPreview: string[];
+    hooksPreview: string[];
+    mcpPreview: string[];
+    harnessProfile: string | null;
 }
 
 export async function buildDryRunPreview(opts: {
@@ -54,7 +63,57 @@ export async function buildDryRunPreview(opts: {
         toolCount: catalog.length,
         matchingTools: matchingTools(opts.task ?? "", catalog),
         nextActions: ready ? ["run the prompt directly"] : ["set an API key or choose a local/base-url profile"],
+        skillsPreview: skillsPreview(),
+        hooksPreview: hooksPreview(),
+        mcpPreview: mcpPreview(),
+        harnessProfile: harnessProfilePreview(resolved.model),
     };
+}
+
+function skillsPreview(): string[] {
+    const names: string[] = [];
+    for (const root of [join(process.cwd(), "skills"), join(homedir(), ".clawagents", "skills")]) {
+        if (!existsSync(root) || !statSync(root).isDirectory()) continue;
+        for (const child of readdirSync(root).sort()) {
+            const skillMd = join(root, child, "SKILL.md");
+            if (existsSync(skillMd) && statSync(skillMd).isFile()) names.push(child);
+        }
+    }
+    return names.slice(0, 20);
+}
+
+function hooksPreview(): string[] {
+    const hooksDir = join(process.cwd(), ".clawagents", "hooks");
+    if (!existsSync(hooksDir) || !statSync(hooksDir).isDirectory()) return [];
+    return readdirSync(hooksDir)
+        .filter((name) => /\.(py|ts|js)$/.test(name))
+        .sort();
+}
+
+function mcpPreview(): string[] {
+    const paths = [
+        join(process.cwd(), ".clawagents", "mcp.json"),
+        join(homedir(), ".clawagents", "mcp.json"),
+    ];
+    const servers: string[] = [];
+    for (const path of paths) {
+        if (!existsSync(path)) continue;
+        try {
+            const raw = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+            const mcpServers = (raw.mcpServers ?? raw.servers ?? raw) as Record<string, unknown>;
+            if (mcpServers && typeof mcpServers === "object") {
+                servers.push(...Object.keys(mcpServers).sort());
+            }
+        } catch {
+            // skip invalid mcp config
+        }
+    }
+    return servers.slice(0, 20);
+}
+
+function harnessProfilePreview(model?: string): string | null {
+    const profile = resolveHarnessProfile(model);
+    return profile?.name ?? null;
 }
 
 function buildToolCatalog() {

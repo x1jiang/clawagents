@@ -1,15 +1,27 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.8.1**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.9.0**
 
-> **v6.8.1 (May 2026)** — Prompt architecture and packaged-surface polish.
-> Adds shared prompt assembly helpers, packages bundled skills into `dist/skills`
-> for installed consumers, refreshes the OpenHarness comparison, and keeps the
-> v6.8.0 operational surfaces plus v6.7.1 compact tool-discovery recovery and
-> v6.7.0 security hardening.
+> **v6.9.0 (June 2026)** — Cross-session history recall, machine-readable CLI output,
+> and governed skill promotion. Adds `search_history`, `--output-format json|stream-json`,
+> PTRL recurring-lesson → `skill_workshop` proposals, consolidated session search,
+> and the governed `skill_workshop` tool. Builds on v6.8.1 prompt/packaging polish.
 > See [Changelog](#changelog).
 
-### New In v6.8.1
+### New In v6.9.0
+
+```bash
+npx tsx src/cli.ts --task "summarize prior runs" --output-format json
+npx tsx src/cli.ts --task "find pytest timeout discussions"  # search_history tool
+```
+
+- **`search_history` tool** — cross-session archive search (SQLite + optional JSONL); raw prior message snippets, not summaries.
+- **`--output-format`** — `text`, `json`, or `stream-json` on `--task` for automation.
+- **PTRL → skill promotion** — recurring lessons (≥3×) create pending `skill_workshop` proposals.
+- **`skill_workshop` tool** — governed skill authoring without writing live `SKILL.md` directly.
+- **Consolidated search stack** — shared `searchSqliteMessages`, `snippetFromContent`, lesson utilities in `trajectory/lessons`.
+
+### Previously In v6.8.1
 
 ```bash
 npx tsx src/cli.ts --dry-run --profile ollama --task "inspect this repo"
@@ -369,6 +381,7 @@ clawagents --task "hello world"                              # 5. Run first task
 | `--doctor` | Check configuration health: `.env` discovery, API keys, active model, LLM settings, PTRL flags, local endpoint reachability, trajectory history. |
 | `--tools [--json]` | Inspect built-in tool schemas without starting a model client. Useful for release checks and native-tool schema debugging. |
 | `--task "..."` | Run a single task. Prints a startup banner (`provider=X model=Y env=Z ptrl=...`), executes the agent, prints the result. |
+| `--task "..." --output-format json` | Same as `--task`, but emit JSON (`status`, `result`, `iterations`, …). Use `stream-json` for NDJSON events. |
 | `--trajectory [N]` | Inspect the last N run summaries (default: 1). Shows score, quality, failures, judge verdict. Requires `CLAW_TRAJECTORY=1`. |
 | `--port N` | Start the HTTP gateway server on port N (default: 3000). |
 | `--sessions` | List saved sessions (requires `CLAW_FEATURE_SESSION_PERSISTENCE=1`). |
@@ -505,6 +518,8 @@ Every agent includes these — no setup needed:
 | `use_skill` | Load a skill's instructions (when skills exist) |
 | `ask_user_question` | Structured HITL: ask 1-3 multiple-choice questions in one batch (opt-in) |
 | `tool_program` | Bounded read-only multi-tool sequence with `${step.output}` substitutions |
+| `search_history` | Cross-session raw message recall from archived sessions |
+| `skill_workshop` | Governed skill proposals (create/update/apply/reject/rollback) |
 
 ### Structured HITL — `ask_user_question`
 
@@ -802,7 +817,7 @@ development.
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.8.1 (TypeScript)** against four peer agent frameworks:
+> Compares **ClawAgents v6.9.0 (TypeScript)** against four peer agent frameworks:
 > **Hermes Agent** ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)),
 > **DeepAgents** ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)),
 > and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
@@ -812,7 +827,7 @@ development.
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.8.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.9.0 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -905,6 +920,23 @@ development.
 ---
 
 ## Changelog
+
+### v6.9.0 — History recall, CLI output formats, governed skill promotion (June 2026)
+
+Minor release focused on machine-readable CLI output, cross-session memory
+recall, and closing the loop from PTRL lessons to governed skill proposals.
+
+- **`search_history` tool** — cross-session archive search (SQLite + optional
+  JSONL) with session filter and `format=json` on the tool.
+- **`--output-format`** — `--task` accepts `text`, `json`, or `stream-json`.
+- **PTRL lesson promotion** — recurring lesson bullets create pending
+  `skill_workshop` proposals after three occurrences.
+- **`skill_workshop` tool** — governed skill workflow (create/update/apply/…).
+- **Search consolidation** — `searchSqliteMessages`, `snippet.ts`, shared lesson
+  utilities; `consolidation-hardening.test.ts` integration coverage.
+
+Release verification: **TypeScript 545 passed, 4 skipped**, `tsc --noEmit`;
+Python sibling: **18 consolidation/feature tests passed**.
 
 ### v6.8.1 — Prompt architecture and release packaging polish (May 2026)
 
