@@ -1,11 +1,9 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.9.0**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.9.1**
 
-> **v6.9.0 (June 2026)** — Cross-session history recall, machine-readable CLI output,
-> and governed skill promotion. Adds `search_history`, `--output-format json|stream-json`,
-> PTRL recurring-lesson → `skill_workshop` proposals, consolidated session search,
-> and the governed `skill_workshop` tool. Builds on v6.8.1 prompt/packaging polish.
+> **v6.9.1 (June 2026)** — Patch release: CI-green parity with Python v6.9.1
+> (version bump + README sync). All v6.9.0 features below remain current.
 > See [Changelog](#changelog).
 
 ### New In v6.9.0
@@ -817,7 +815,7 @@ development.
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.9.0 (TypeScript)** against four peer agent frameworks:
+> Compares **ClawAgents v6.9.1 (TypeScript)** against four peer agent frameworks:
 > **Hermes Agent** ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)),
 > **DeepAgents** ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)),
 > and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
@@ -827,7 +825,7 @@ development.
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.9.0 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.9.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -920,6 +918,12 @@ development.
 ---
 
 ## Changelog
+
+### v6.9.1 — CI/test hardening (June 2026)
+
+Patch release aligned with Python v6.9.1: version bump and README sync for the
+v6.9.0 feature set (`search_history`, `--output-format`, `skill_workshop`, PTRL
+lesson promotion).
 
 ### v6.9.0 — History recall, CLI output formats, governed skill promotion (June 2026)
 
