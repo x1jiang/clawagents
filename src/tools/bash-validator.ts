@@ -120,7 +120,94 @@ function splitFirstToken(command: string): { program: string; tokens: string[] }
         tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
     }
     if (tokens.length === 0) return { program: "", tokens: [] };
-    return { program: tokens[0], tokens };
+    // Strip a leading backslash used to bypass a shell alias (`\rm` runs the
+    // real `rm`): the program name for classification is still `rm`.
+    let program = tokens[0]!;
+    if (program.startsWith("\\") && program.length > 1) program = program.slice(1);
+    return { program, tokens };
+}
+
+// ─── Launcher / wrapper commands ─────────────────────────────────────────
+// These programs run *another* command given later in their argv. Classifying
+// only the first token would let `env rm -rf /` or `timeout 5 rm -rf /` sail
+// past every destructive-command BLOCK, so we peel the wrapper and
+// re-classify the inner command instead.
+const WRAPPER_PROGRAMS = new Set([
+    "env", "command", "nice", "nohup", "timeout", "xargs", "setsid",
+    "stdbuf", "time", "ionice", "chrt", "busybox", "sudo", "doas", "eval",
+]);
+
+// Wrapper options that consume the *following* token as their argument (so we
+// don't mistake that argument for the inner command). Attached forms like
+// `-o0` / `-I{}` are handled by the generic "skip one option token" rule.
+const WRAPPER_OPT_TAKES_ARG: Record<string, Set<string>> = {
+    env: new Set(["-u", "-C", "-S", "--unset", "--chdir"]),
+    timeout: new Set(["-s", "-k", "--signal", "--kill-after"]),
+    nice: new Set(["-n", "--adjustment"]),
+    ionice: new Set(["-c", "-n", "-p"]),
+    stdbuf: new Set(["-i", "-o", "-e", "--input", "--output", "--error"]),
+    xargs: new Set([
+        "-I", "-i", "-L", "-n", "-P", "-s", "-d", "-E", "-a",
+        "--replace", "--max-args", "--max-procs", "--max-lines", "--delimiter",
+    ]),
+    sudo: new Set(["-u", "-g", "-C", "-p", "-r", "-t", "-U", "--user", "--group"]),
+    doas: new Set(["-u", "-C"]),
+};
+
+/** Return the inner command string wrapped by `program`, or null. */
+function peelWrapper(program: string, tokens: string[]): string | null {
+    // `eval`/`command` take a command *string*: re-join the remainder and let
+    // the caller re-parse it (it may contain its own separators/quotes).
+    if (program === "eval" || program === "command") {
+        const inner = tokens.slice(1);
+        if (program === "command") {
+            // `command -v foo` / `-V` are lookups (don't run foo); leave the
+            // classification to `command` itself rather than the target.
+            if (inner.some((t) => t === "-v" || t === "-V" || t === "-p")) return null;
+        }
+        const joined = inner.join(" ").trim();
+        return joined || null;
+    }
+
+    const takesArg = WRAPPER_OPT_TAKES_ARG[program] ?? new Set<string>();
+    let i = 1;
+    const n = tokens.length;
+    while (i < n) {
+        const t = tokens[i]!;
+        if (program === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) { i += 1; continue; }
+        if (t === "--") { i += 1; break; }
+        if (t.startsWith("-") && t !== "-") {
+            // Space-separated option argument (`-n 10`, `-s KILL`). Attached
+            // forms (`-n10`, `-oL`) carry their arg in the same token.
+            i += takesArg.has(t) ? 2 : 1;
+            continue;
+        }
+        break;
+    }
+    // `timeout [opts] DURATION COMMAND` — first non-option token is the duration.
+    if (program === "timeout" && i < n) i += 1;
+    if (i < n) {
+        const joined = tokens.slice(i).join(" ").trim();
+        return joined || null;
+    }
+    return null;
+}
+
+/** Collapse redundant slashes and resolve `.`/`..` segments (posix normpath). */
+function normalizePosixPath(p: string): string {
+    const collapsed = p.replace(/\/{2,}/g, "/");
+    const isAbs = collapsed.startsWith("/");
+    const out: string[] = [];
+    for (const seg of collapsed.split("/")) {
+        if (seg === "" || seg === ".") continue;
+        if (seg === "..") {
+            if (out.length && out[out.length - 1] !== "..") out.pop();
+            else if (!isAbs) out.push("..");
+        } else {
+            out.push(seg);
+        }
+    }
+    return (isAbs ? "/" : "") + out.join("/") || (isAbs ? "/" : ".");
 }
 
 const ROOT_LIKE_LITERALS = new Set([
@@ -138,8 +225,12 @@ function isRootLikePath(rawPath: string): boolean {
     p = p.replace(/\/+$/, "") || "/";
     if (ROOT_LIKE_LITERALS.has(p)) return true;
     if (p.startsWith("~") || p.startsWith("$HOME") || p.startsWith("${HOME}")) return true;
+    // Normalize redundant slashes and `.`/`..` segments so `//etc`, `/./etc`
+    // and `/etc/../etc` all resolve to the system root they hit at execution
+    // time instead of sliding past the check to a mere WARN.
+    const norm = p.startsWith("/") ? normalizePosixPath(p) : p;
     for (const d of SYSTEM_ROOTS) {
-        if (p === d || p.startsWith(d + "/")) return true;
+        if (p === d || p.startsWith(d + "/") || norm === d || norm.startsWith(d + "/")) return true;
     }
     return false;
 }
@@ -503,7 +594,7 @@ function dispatchProgram(program: string, tokens: string[]): BashDecision {
     };
 }
 
-function validateSingleClause(raw: string): BashDecision {
+function validateSingleClause(raw: string, depth = 0): BashDecision {
     if (REDIRECT_TO_BLOCK_DEV_RE.test(raw)) {
         return {
             category: CommandCategory.DESTRUCTIVE,
@@ -546,6 +637,34 @@ function validateSingleClause(raw: string): BashDecision {
             matchedPattern: "",
         };
     }
+
+    // Launcher/wrapper prefixes (`env`, `timeout`, `eval`, `sudo`, …) run a
+    // *different* command; classify that inner command, not the wrapper, so
+    // `env rm -rf /` can't launder a destructive call past the BLOCK list.
+    if (WRAPPER_PROGRAMS.has(program) && depth < 6) {
+        const inner = peelWrapper(program, tokens);
+        if (inner && inner !== raw.trim()) {
+            // Re-collect clauses: the inner payload (esp. for `eval`/`xargs`)
+            // may itself contain separators, substitutions, or `bash -c`.
+            const innerClauses = collectClauses(inner);
+            const list = innerClauses.length > 0 ? innerClauses : [inner];
+            let innerWorst: BashDecision | null = null;
+            for (const clause of list) {
+                const d = validateSingleClause(clause, depth + 1);
+                if (d.decision === Decision.BLOCK) return d;
+                if (innerWorst === null || severity(d) > severity(innerWorst)) innerWorst = d;
+            }
+            if (innerWorst !== null) {
+                // The wrapper contributes its own risk floor (`sudo` is
+                // SYSTEM_ADMIN, `env` is read-only); the inner command can only
+                // escalate it. Strictest wins; on a tie keep the wrapper's own
+                // classification so `sudo apt-get update` stays SYSTEM_ADMIN.
+                const own = dispatchProgram(program, tokens);
+                return severity(innerWorst) > severity(own) ? innerWorst : own;
+            }
+        }
+    }
+
     return dispatchProgram(program, tokens);
 }
 

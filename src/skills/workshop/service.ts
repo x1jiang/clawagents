@@ -83,13 +83,14 @@ export class SkillWorkshopService {
     apply(proposalId: string): Record<string, unknown> {
         const rec = this.store.get(proposalId);
         if (!rec) return { ok: false, error: "not found" };
+        // Every finding the scanner emits is a real reason to refuse writing the
+        // proposal to a live SKILL.md — most importantly the "suspicious
+        // pattern …" findings (rm -rf, `curl … | sh`, `eval(`, `__import__` …)
+        // and the oversize/too-many/bad-path ones. The old substring gate
+        // ("exceeds"/"invalid"/"must be") let the security and resource findings
+        // through, making the malicious-pattern check cosmetic. Block on any.
         if (rec.scanFindings.length > 0) {
-            const blocking = rec.scanFindings.filter(
-                (f) => f.includes("exceeds") || f.includes("invalid") || f.includes("must be"),
-            );
-            if (blocking.length > 0) {
-                return { ok: false, error: "scan blocked apply", findings: rec.scanFindings };
-            }
+            return { ok: false, error: "scan blocked apply", findings: rec.scanFindings };
         }
         const [ok, msg, rollbackId] = this.store.applyProposal(proposalId);
         return { ok, message: msg, rollback_id: rollbackId };

@@ -9,7 +9,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import { existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { Tool, ToolResult } from "./registry.js";
 
 export interface Skill {
@@ -121,8 +121,13 @@ function isSkillEligible(skill: Skill): boolean {
     if (req.os && process.platform !== req.os) return false;
     if (req.bins) {
         for (const bin of req.bins) {
+            // `bin` comes from untrusted SKILL.md YAML. Never interpolate it
+            // into a shell string — a value like `x;touch /tmp/pwned` would
+            // execute arbitrary commands at skill-load time. Reject anything
+            // that isn't a plain program name, then look it up shell-free.
+            if (!/^[\w.+-]+$/.test(bin)) return false;
             try {
-                execSync(`which ${bin}`, { stdio: "ignore" });
+                execFileSync("which", [bin], { stdio: "ignore" });
             } catch {
                 return false;
             }

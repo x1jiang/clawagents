@@ -1,12 +1,22 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.9.1**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.9.2**
 
-> **v6.9.1 (June 2026)** — Patch release: CI-green parity with Python v6.9.1
-> (version bump + README sync). All v6.9.0 features below remain current.
+> **v6.9.2 (July 2026)** — Security and provider hardening: bash-validator wrapper
+> peeling, gateway CORS safe defaults, plan-mode escape fix, provider parity fixes.
 > See [Changelog](#changelog).
 
-### New In v6.9.0
+### New In v6.9.2
+
+- **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
+- **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
+- **Plan-mode escape fix** — agent-as-tool subagents now inherit the parent's permission mode.
+- **Provider parity** — strips `__CACHE_BOUNDARY__` from OpenAI/Gemini prompts; Anthropic honours `temperature=0`; Gemini skips malformed image URLs; OpenAI handles empty `choices` arrays.
+- **Steer hook fix** — nudge messages use proper message objects instead of raw dicts.
+- **Skill workshop** — blocks apply on any scanner finding (including malicious-pattern detections).
+- **Sandbox env redaction** — broad secret-name matcher catches `*_TOKEN`, `*_API_KEY`, `*PASSWORD*`, etc.
+
+### Previously In v6.9.0
 
 ```bash
 npx tsx src/cli.ts --task "summarize prior runs" --output-format json
@@ -815,7 +825,7 @@ development.
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.9.1 (TypeScript)** against four peer agent frameworks:
+> Compares **ClawAgents v6.9.2 (TypeScript)** against four peer agent frameworks:
 > **Hermes Agent** ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)),
 > **DeepAgents** ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)),
 > and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
@@ -825,7 +835,7 @@ development.
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.9.1 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.9.2 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -918,6 +928,22 @@ development.
 ---
 
 ## Changelog
+
+### v6.9.2 — Security and provider hardening (July 2026)
+
+Patch release closing security review findings and provider parity gaps,
+aligned with Python v6.9.2.
+
+- **Bash validator** — wrapper peeling, alias bypass, root-path normalization.
+- **Gateway CORS** — localhost-only default origins; no credentials with `*`.
+- **Plan-mode escape** — agent-as-tool forwards parent run context.
+- **Providers** — cache-boundary stripping, Anthropic `temperature=0`, Gemini
+  image URL safety, OpenAI empty-choices guard.
+- **Steer hook** — nudges append proper message objects not dicts.
+- **Skill workshop** — block apply on any scan finding.
+- **Sandbox** — secret-name env redaction beyond static denylist.
+
+Release verification: **TypeScript 549 passed, 4 skipped**, `tsc --noEmit`.
 
 ### v6.9.1 — CI/test hardening (June 2026)
 

@@ -18,6 +18,11 @@ import { atomicWriteFileSync } from "../utils/atomic-write.js";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { redact, redactObj } from "../redact.js";
+// Static ESM import: `require` is not defined in this "type":"module" package,
+// so the previous lazy `require("./verifier.js")` calls always threw and were
+// swallowed — leaving deterministic/verified scores permanently null. (The
+// verifier's only import from here is `import type`, so there is no cycle.)
+import { computeDeterministicScore, detectTaskType, verifyTaskOutcome } from "./verifier.js";
 
 function getTrajectoriesDir(): string {
     return resolve(process.cwd(), ".clawagents", "trajectories");
@@ -237,7 +242,6 @@ export class TrajectoryRecorder {
         // Feature A: deterministic score from execution tools
         let detScore: number | null = null;
         try {
-            const { computeDeterministicScore } = require("./verifier.js");
             const callDicts = calls.map((c) => ({
                 toolName: c.toolName, success: c.success,
                 outputPreview: c.outputPreview, error: c.error,
@@ -326,9 +330,12 @@ export class TrajectoryRecorder {
         let verifiedConfidence = "";
         let verifiedMethod = "";
         try {
-            const { detectTaskType, verifyTaskOutcome } = require("./verifier.js");
             taskType = detectTaskType(this.task);
-            const result = verifyTaskOutcome(taskType, this.turns, outcome);
+            // `verifyTaskOutcome` reads `.toolCalls` off each turn (present on
+            // TurnRecord); the cast bridges the structural index-signature gap.
+            const result = verifyTaskOutcome(
+                taskType, this.turns as unknown as Array<Record<string, unknown>>, outcome,
+            );
             verifiedScore = result.verifiedScore;
             verifiedConfidence = result.confidence ?? "";
             verifiedMethod = result.method ?? "";

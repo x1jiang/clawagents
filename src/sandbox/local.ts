@@ -25,6 +25,7 @@ import {
 } from "node:path";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
+import { isSecretName } from "../redact.js";
 import type {
     SandboxBackend,
     DirEntry,
@@ -171,9 +172,13 @@ export class LocalBackend implements SandboxBackend {
     ]);
 
     private sanitizedEnv(): Record<string, string> {
+        // The explicit denylist above is a floor; the broad name-based matcher
+        // (`*_TOKEN`/`*_API_KEY`/`*_SECRET`/`*PASSWORD*` …) catches the long
+        // tail (GITHUB_TOKEN, AWS_ACCESS_KEY_ID, DB_PASSWORD, …) that the static
+        // set would otherwise leak into LLM-generated shell commands.
         const env: Record<string, string> = {};
         for (const [k, v] of Object.entries(process.env)) {
-            if (v !== undefined && !LocalBackend.SENSITIVE_ENV_KEYS.has(k)) {
+            if (v !== undefined && !LocalBackend.SENSITIVE_ENV_KEYS.has(k) && !isSecretName(k)) {
                 env[k] = v;
             }
         }

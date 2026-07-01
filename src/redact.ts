@@ -50,7 +50,11 @@ const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     ),
     compile(
         "BEARER",
-        "\\b(?:authorization|bearer)\\s*[:=]\\s*['\\\"]?[A-Za-z0-9_\\-.~+/=]{16,}['\\\"]?",
+        // Mirrors the Python pattern: allow an optional `bearer `/`basic `/
+        // `token ` scheme between the header name and the value so the standard
+        // `Authorization: Bearer <token>` form is redacted, not just `key=val`.
+        "(?:authorization|proxy-authorization|x[_-]?api[_-]?key)\\s*[:=]\\s*" +
+            "(?:bearer\\s+|basic\\s+|token\\s+)?['\\\"]?[A-Za-z0-9_\\-.~+/=]{16,}['\\\"]?",
         "gi",
     ),
     compile(

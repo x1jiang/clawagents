@@ -71,8 +71,8 @@ export interface ToolCatalogEntry {
 
 import { ResultCacheManager } from "./cache.js";
 import { validateToolArgs, formatValidationErrors } from "./validate.js";
-import { resolve } from "node:path";
-import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import { copyFileSync, mkdirSync, existsSync, statSync, realpathSync } from "node:fs";
 
 // ─── Lazy Factory Tool ──────────────────────────────────────────────────────
 // Like LazyTool but accepts a factory function instead of module+class.
@@ -190,12 +190,20 @@ export function snapshotBeforeWrite(toolName: string, args: Record<string, unkno
     try {
         if (!existsSync(pathStr) || !statSync(pathStr).isFile()) return;
 
+        // Confine to the workspace root: this snapshot runs *before* the write
+        // tool's own `safePath` check, so without this guard an LLM-supplied
+        // absolute/`..` path (`/etc/passwd`) would be copied into the readable
+        // in-workspace snapshot dir — an arbitrary host-file exfiltration channel.
+        const root = realpathSync(process.cwd());
+        const resolved = realpathSync(pathStr);
+        if (resolved !== root && !resolved.startsWith(root + sep)) return;
+
         const ts = Math.floor(Date.now() / 1000);
-        const snapDir = resolve(process.cwd(), ".clawagents", "snapshots", String(ts));
+        const snapDir = resolve(root, ".clawagents", "snapshots", String(ts));
         mkdirSync(snapDir, { recursive: true });
 
         const basename = pathStr.split("/").pop() || pathStr.split("\\").pop() || "file";
-        copyFileSync(pathStr, resolve(snapDir, basename));
+        copyFileSync(resolved, resolve(snapDir, basename));
     } catch {
         // Snapshot failure should never block tool execution
     }

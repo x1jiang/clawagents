@@ -96,8 +96,17 @@ const RETRY = {
 } as const;
 
 function isRetryable(err: unknown): boolean {
+    // Connection/timeout errors extend APIError but carry `status === undefined`,
+    // so a bare `retryableStatusCodes.has(err.status)` check treats a transient
+    // DNS blip or dropped socket as fatal. Retry them explicitly.
+    if (err instanceof OpenAI.APIConnectionError) {
+        return true;
+    }
     if (err instanceof OpenAI.APIError) {
-        return RETRY.retryableStatusCodes.has(err.status);
+        if (typeof err.status === "number") {
+            return RETRY.retryableStatusCodes.has(err.status);
+        }
+        // status undefined → fall through to the message heuristics below.
     }
     if (err instanceof Error) {
         const m = err.message.toLowerCase();
@@ -367,7 +376,14 @@ export class OpenAIProvider implements LLMProvider {
                     })),
                 });
             } else {
-                formatted.push({ role: m.role, content: m.content });
+                let content = m.content;
+                // The `__CACHE_BOUNDARY__` marker is an Anthropic-only prompt
+                // cache hint; strip it so OpenAI never receives the stray
+                // internal token at the tail of its system prompt.
+                if (typeof content === "string" && content.includes("__CACHE_BOUNDARY__")) {
+                    content = content.replace(/__CACHE_BOUNDARY__/g, "").trim();
+                }
+                formatted.push({ role: m.role, content });
             }
         }
         const oaiTools = options?.tools ? toOpenAITools(options.tools) : undefined;
@@ -554,7 +570,10 @@ export class GeminiProvider implements LLMProvider {
                 }
                 return String(m.content);
             })
-            .join("\n");
+            .join("\n")
+            // `__CACHE_BOUNDARY__` is an Anthropic-only prompt-cache hint; strip
+            // it so Gemini never receives the stray internal marker.
+            .replace(/__CACHE_BOUNDARY__/g, "").trim();
 
         // Build a toolCallId → toolName lookup from all assistant messages with toolCallsMeta
         const tcIdToName: Record<string, string> = {};
@@ -595,9 +614,13 @@ export class GeminiProvider implements LLMProvider {
                             parts.push({ text: part.text ?? "" });
                         } else if (part.type === "image_url") {
                             const url = (part.image_url as Record<string, string>)?.url ?? "";
-                            if (url.startsWith("data:")) {
+                            // Only base64 data URLs are inlineable. A bare
+                            // `data:image/svg+xml,<svg>` (no `;base64,`) or a
+                            // remote http(s) URL would otherwise push an
+                            // `inlineData` with `data: undefined` — skip it.
+                            if (url.startsWith("data:") && url.includes(";base64,")) {
                                 const [header, b64] = url.slice(5).split(";base64,");
-                                parts.push({ inlineData: { mimeType: header, data: b64 } });
+                                if (b64) parts.push({ inlineData: { mimeType: header, data: b64 } });
                             }
                         }
                     }
@@ -875,7 +898,11 @@ export class AnthropicProvider implements LLMProvider {
                 kwargs.system = joined;
             }
         }
-        if (this.temperature > 0) kwargs.temperature = this.temperature;
+        // Send temperature whenever it's set (including 0). Gating on `> 0`
+        // dropped `temperature: 0` — the framework default — so Anthropic
+        // silently sampled at the API default of 1.0 while OpenAI/Gemini
+        // honoured 0, making "temperature: 0" runs non-deterministic on Claude.
+        if (this.temperature >= 0) kwargs.temperature = this.temperature;
         if (options?.tools?.length) {
             kwargs.tools = options.tools.map((s) => ({
                 name: s.name,

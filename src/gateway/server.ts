@@ -114,9 +114,21 @@ async function handleRequest(
     activeModel: string,
     gatewayApiKey = "",
 ) {
-    // CORS headers
-    const corsOrigins = process.env["GATEWAY_CORS_ORIGINS"] ?? "*";
-    res.setHeader("Access-Control-Allow-Origin", corsOrigins);
+    // CORS headers. Default to a same-origin localhost allowlist rather than
+    // `*`: a wildcard let any website the operator happened to visit POST to an
+    // unauthenticated loopback gateway and drive agent runs (a CSRF/drive-by
+    // hole). Reflect the request Origin only when it's on the allowlist.
+    const corsEnv = process.env["GATEWAY_CORS_ORIGINS"];
+    const allowlist = corsEnv === undefined
+        ? ["http://localhost:3000", "http://127.0.0.1:3000"]
+        : corsEnv.split(",").map((o) => o.trim()).filter(Boolean);
+    const reqOrigin = req.headers.origin;
+    if (allowlist.includes("*")) {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+    } else if (reqOrigin && allowlist.includes(reqOrigin)) {
+        res.setHeader("Access-Control-Allow-Origin", reqOrigin);
+        res.setHeader("Vary", "Origin");
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
 

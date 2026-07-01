@@ -274,7 +274,15 @@ export class ClawAgent {
 
                 let childState: AgentState;
                 try {
-                    childState = await wrapped.invoke(task);
+                    // Forward the parent's run context so the child inherits its
+                    // permissionMode (and approvals). Without this the child ran
+                    // with a fresh DEFAULT context, letting an agent-as-tool run
+                    // write/exec tools while the parent was in plan mode — a
+                    // plan-mode escape.
+                    childState = await wrapped.invoke(
+                        task, undefined, undefined, undefined, undefined,
+                        runContext ? { runContext } : undefined,
+                    );
                 } catch (e) {
                     return { success: false, output: "", error: `${toolName} raised: ${e}` };
                 }
