@@ -37,6 +37,9 @@ type LaneState = {
     maxConcurrent: number;
     draining: boolean;
     generation: number;
+    /** True while a barrier task is executing: nothing else may be dispatched
+     *  in the lane until it finishes, even when maxConcurrent > 1. */
+    barrierActive: boolean;
 };
 
 const lanes = new Map<string, LaneState>();
@@ -54,6 +57,7 @@ function getLaneState(lane: string): LaneState {
         maxConcurrent: 1,
         draining: false,
         generation: 0,
+        barrierActive: false,
     };
     lanes.set(lane, created);
     return created;
@@ -76,6 +80,13 @@ function drainLane(lane: string) {
 
     const pump = () => {
         while (state.activeTaskIds.size < state.maxConcurrent && state.queue.length > 0) {
+            // A running barrier is exclusive: with maxConcurrent > 1 the
+            // active-count check alone would happily dispatch new tasks
+            // alongside it.
+            if (state.barrierActive) {
+                break;
+            }
+
             const entry = state.queue[0] as QueueEntry;
 
             // Barrier: wait until all active tasks finish before dispatching.
@@ -96,11 +107,17 @@ function drainLane(lane: string) {
             const taskGeneration = state.generation;
             state.activeTaskIds.add(taskId);
             const isBarrierEntry = entry.isBarrier ?? false;
+            if (isBarrierEntry) {
+                state.barrierActive = true;
+            }
             void (async () => {
                 const startTime = Date.now();
                 try {
                     const result = await entry.task();
                     const completedCurrentGeneration = completeTask(state, taskId, taskGeneration);
+                    if (isBarrierEntry && taskGeneration === state.generation) {
+                        state.barrierActive = false;
+                    }
                     if (completedCurrentGeneration) {
                         diag.debug(
                             `lane task done: lane=${lane} durationMs=${Date.now() - startTime} active=${state.activeTaskIds.size} queued=${state.queue.length}`,
@@ -110,6 +127,9 @@ function drainLane(lane: string) {
                     entry.resolve(result);
                 } catch (err) {
                     const completedCurrentGeneration = completeTask(state, taskId, taskGeneration);
+                    if (isBarrierEntry && taskGeneration === state.generation) {
+                        state.barrierActive = false;
+                    }
                     const isProbeLane = lane.startsWith("auth-probe:") || lane.startsWith("session:probe-");
                     if (!isProbeLane) {
                         diag.error(
@@ -261,6 +281,7 @@ export function resetAllLanes(): void {
         state.generation += 1;
         state.activeTaskIds.clear();
         state.draining = false;
+        state.barrierActive = false;
         if (state.queue.length > 0) {
             lanesToDrain.push(state.lane);
         }

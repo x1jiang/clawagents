@@ -154,7 +154,10 @@ export class BackgroundJobManager {
             }
         };
 
-        child.on("exit", (code, signalReason) => {
+        // 'close' fires after the stdio streams have flushed; 'exit' can fire
+        // while stdout/stderr data is still buffered, so awaitComplete and
+        // the notifier observed truncated output.
+        child.on("close", (code, signalReason) => {
             void finalize(code, signalReason);
         });
         child.on("error", () => {

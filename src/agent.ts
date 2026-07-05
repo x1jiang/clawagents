@@ -317,9 +317,13 @@ export class ClawAgent {
     /** Inject context into every LLM call. Example: agent.injectContext("Respond in Spanish") */
     injectContext(text: string): void {
         const existing = this.beforeLLM;
+        const marker = `[Context] ${text}`;
         this.beforeLLM = (messages) => {
             if (existing) messages = existing(messages);
-            return [...messages, { role: "user" as const, content: `[Context] ${text}` }];
+            // Idempotent: beforeLLM runs every loop round; without this
+            // check the context message accumulated one copy per round.
+            if (messages.some((m) => m.content === marker)) return messages;
+            return [...messages, { role: "user" as const, content: marker }];
         };
     }
 

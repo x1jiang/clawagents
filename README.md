@@ -1,12 +1,21 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.9.2**
+A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.10.0**
 
-> **v6.9.2 (July 2026)** — Security and provider hardening: bash-validator wrapper
-> peeling, gateway CORS safe defaults, plan-mode escape fix, provider parity fixes.
-> See [Changelog](#changelog).
+> **v6.10.0 (July 2026)** — Reliability and parity release: session persistence,
+> parallel hook enforcement, provider token accounting, Anthropic streaming,
+> context-window recovery, and agent-loop telemetry fixes. See [Changelog](#changelog).
 
-### New In v6.9.2
+### New In v6.10.0
+
+- **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
+- **Parallel tool policy hooks** — external pre/post hooks and session writes apply in parallel batches; policy gates cannot be bypassed by batching.
+- **History offload redaction** — compacted history files run through the same secret redaction as other persistence surfaces; redaction patterns aligned with Python.
+- **Provider reliability** — normalized `prompt_tokens` / `tokens_used`; mid-stream retry preserves tool calls; **Anthropic streaming** (`onChunk` / abort); coalesced parallel `tool_result` blocks; array `items` in tool schemas; truncated JSON string recovery.
+- **Context & loop fixes** — accurate multimodal token counts; safe compaction split boundaries; deduped prompt injection; micro-compact gated on usage; overflow recovery shrinks effective window; advisor duplicate-message and handoff transcript fixes; one iteration increment per loop round.
+- **Infrastructure** — command-queue barrier exclusivity; `onStreamEvent` async rejection handling; stream-event key drift fixed; input-guardrail approval no longer blocks all tool calls; background jobs finalize on `close`; coordinator stdin EPIPE guard; bounded gateway WS sessions; ACP tool-id matching; cron-parser v5 compatibility.
+
+### Previously In v6.9.2
 
 - **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
 - **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
@@ -825,7 +834,7 @@ development.
 
 ## Feature Matrix
 
-> Compares **ClawAgents v6.9.2 (TypeScript)** against four peer agent frameworks:
+> Compares **ClawAgents v6.10.0 (TypeScript)** against four peer agent frameworks:
 > **Hermes Agent** ([metaspartan/hermes-agent](https://github.com/metaspartan/hermes-agent)),
 > **DeepAgents** ([langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)),
 > and **OpenClaw**, plus **OpenHarness** ([HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness)).
@@ -835,7 +844,7 @@ development.
 > every row in the ClawAgents column is ✅. `◐` means partial or comparable
 > coverage rather than exact feature parity.
 
-| Feature | ClawAgents v6.9.2 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
+| Feature | ClawAgents v6.10.0 | Hermes Agent | DeepAgents | OpenClaw | OpenHarness |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core** |  |  |  |  |  |
 | ReAct loop | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -928,6 +937,24 @@ development.
 ---
 
 ## Changelog
+
+### v6.10.0 — Reliability and parity release (July 2026)
+
+Cross-cutting hardening aligned with Python v6.10.0: session persistence,
+parallel hook enforcement, provider correctness (including Anthropic streaming),
+context recovery, and agent-loop telemetry.
+
+- **Session persistence** — identity-based tracking; regression tests added.
+- **Parallel tools** — external policy hooks, session writes, output offloading.
+- **Providers** — token accounting, stream partials, Anthropic streaming path,
+  tool-result coalescing, schema `items`, `repair_json` string truncation fix.
+- **Redaction** — history offload + pattern parity with Python.
+- **Agent loop** — iterations, injection dedupe, micro-compact gating, overflow
+  window shrink, advisor/handoff fixes, stream-event decoding.
+- **Infrastructure** — command-queue barriers, background `close`, coordinator
+  stdin guard, bounded WS sessions, ACP call-id matching, cron-parser v5 shim.
+
+Release verification: **TypeScript 557 passed, 1 skipped**, `tsc --noEmit`.
 
 ### v6.9.2 — Security and provider hardening (July 2026)
 

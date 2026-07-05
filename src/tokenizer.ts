@@ -123,10 +123,13 @@ export function countTokensContent(
     if (typeof content === "string") {
         base = countTokens(content, model);
     } else {
-        // Multimodal: text parts + ~500 tokens per image part
-        const textChars = content.reduce((acc, p) => acc + (p.text?.length || 0), 0);
+        // Multimodal: tokenize the REAL text + ~500 tokens per image part.
+        // Encoding "x".repeat(n) BPE-compresses a run of identical chars to a
+        // handful of tokens, so estimates were wildly low whenever tiktoken
+        // was active — leading to overflow on requests we thought fit.
+        const text = content.map((p) => p.text ?? "").join("\n");
         const imageCount = content.filter((p) => p.type === "image_url").length;
-        base = countTokens("x".repeat(textChars), model) + imageCount * 500;
+        base = countTokens(text, model) + imageCount * 500;
     }
     return Math.ceil(base * multiplier);
 }

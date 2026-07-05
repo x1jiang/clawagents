@@ -107,11 +107,14 @@ export function classifyError(err: unknown, provider = ""): ErrorDescriptor {
     const status = extractStatus(err);
 
     // 1. Context window / token overflow
+    // Note: no bare "max_tokens" here — it appears in unrelated validation
+    // errors ("max_tokens must be at least 1"), which would trigger a useless
+    // compact-and-retry loop instead of surfacing the real problem.
     const contextTokens = [
         "context_length_exceeded", "context window", "token limit",
         "maximum context length", "too many tokens",
         "prompt is too long", "request too large",
-        "max_tokens", "context_window_exceeded",
+        "context_window_exceeded", "exceeds the maximum number of tokens",
     ];
     if (contextTokens.some((t) => msg.includes(t))) {
         const recipe = RECOVERY_RECIPES[ErrorClass.CONTEXT_WINDOW];
@@ -228,10 +231,11 @@ function extractStatus(err: unknown): number | null {
         // response.status
         if ("response" in err && (err as any).response?.status) return (err as any).response.status;
     }
-    // String-based fallback
+    // String-based fallback. Word-boundary match so "429" doesn't fire on
+    // "1429 tokens", "file_429.txt", or a request id containing the digits.
     const msg = String(err);
     for (const code of [401, 403, 429, 500, 502, 503, 504]) {
-        if (msg.includes(String(code))) return code;
+        if (new RegExp(`(?<!\\d)${code}(?!\\d)`).test(msg)) return code;
     }
     return null;
 }

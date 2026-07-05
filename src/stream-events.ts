@@ -178,7 +178,9 @@ export function streamEventFromKind(
                 toolName: str(data.toolName ?? data.tool_name ?? data.name),
                 callId: str(data.callId ?? data.call_id ?? data.id),
                 success: bool(data.success, true),
-                output: str(data.output),
+                // The loop emits `preview` (truncated output) — accept it so
+                // typed consumers don't just see "".
+                output: str(data.output ?? data.preview),
                 error: typeof data.error === "string" ? data.error : null,
             };
         case "approval_required":
@@ -202,8 +204,9 @@ export function streamEventFromKind(
             return {
                 ...base,
                 kind,
-                guardrailName: str(data.guardrailName ?? data.guardrail_name),
-                where: str(data.where),
+                // The loop emits `guardrail` + `source` — accept both spellings.
+                guardrailName: str(data.guardrailName ?? data.guardrail_name ?? data.guardrail),
+                where: str(data.where ?? data.source),
                 behavior: str(data.behavior),
                 message: str(data.message),
             };
@@ -229,7 +232,8 @@ export function streamEventFromKind(
                 reason: str(data.reason),
             };
         case "final_output":
-            return { ...base, kind, output: data.output, raw: str(data.raw) };
+            // The loop emits `finalOutput` — accept it alongside `output`.
+            return { ...base, kind, output: data.output ?? data.finalOutput, raw: str(data.raw) };
         case "error":
             return {
                 ...base,

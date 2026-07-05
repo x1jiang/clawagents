@@ -21,6 +21,11 @@ interface SessionEntry {
     messages: Array<{ role: string; content: string; timestamp: number }>;
 }
 
+// Bounded LRU: every sessionId-less message used to mint a fresh entry that
+// was retained forever — a memory leak plus indefinite transcript retention.
+const MAX_SESSIONS = 500;
+const MAX_MESSAGES_PER_SESSION = 200;
+
 const sessions = new Map<string, SessionEntry>();
 
 function resolveLane(raw?: string): string {
@@ -34,11 +39,26 @@ function resolveSession(id?: string): string {
 
 function getOrCreateSession(sessionId: string): SessionEntry {
     let s = sessions.get(sessionId);
-    if (!s) {
+    if (s) {
+        // Refresh recency (Map preserves insertion order → oldest first).
+        sessions.delete(sessionId);
+    } else {
         s = { messages: [] };
-        sessions.set(sessionId, s);
+    }
+    sessions.set(sessionId, s);
+    while (sessions.size > MAX_SESSIONS) {
+        const oldest = sessions.keys().next().value;
+        if (oldest === undefined) break;
+        sessions.delete(oldest);
     }
     return s;
+}
+
+function pushMessages(session: SessionEntry, ...msgs: SessionEntry["messages"]): void {
+    session.messages.push(...msgs);
+    if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
+        session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
+    }
 }
 
 export function attachWebSocket(httpServer: HttpServer, llm: LLMProvider, gatewayApiKey: string) {
@@ -135,7 +155,8 @@ async function handleChatSend(ws: import("ws").WebSocket, msg: WsRequest, llm: L
             });
         });
 
-        session.messages.push(
+        pushMessages(
+            session,
             { role: "user", content: task, timestamp: Date.now() },
             { role: "assistant", content: result.result ?? "", timestamp: Date.now() },
         );
@@ -169,6 +190,6 @@ function handleChatInject(ws: import("ws").WebSocket, msg: WsRequest) {
         return;
     }
     const session = getOrCreateSession(sessionId);
-    session.messages.push({ role: "assistant", content, timestamp: Date.now() });
+    pushMessages(session, { role: "assistant", content, timestamp: Date.now() });
     ws.send(JSON.stringify(makeResponse(msg.id, true, { sessionId, injected: true })));
 }

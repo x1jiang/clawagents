@@ -169,6 +169,9 @@ export class SubprocessWorkerBackend implements WorkerBackend {
                     clearTimeout(timer);
                     resolve(code);
                 });
+                // Without an 'error' listener on stdin, an EPIPE (worker
+                // exits before reading the payload) crashes the host process.
+                child.stdin.on("error", () => { /* worker exited early — close handler reports it */ });
                 child.stdin.end(payload);
             });
 

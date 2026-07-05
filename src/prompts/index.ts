@@ -46,6 +46,12 @@ export function appendPromptInjection<T extends PromptMessage>(
     for (let i = 0; i < result.length; i++) {
         const message = result[i]!;
         if (message.role === "system") {
+            // Idempotent: beforeLLM hooks run every loop round, so without
+            // this check the injection accumulated one copy per round —
+            // wasting tokens and churning the prompt-prefix cache.
+            if (typeof message.content === "string" && message.content.includes(injection)) {
+                return messages;
+            }
             result[i] = {
                 ...message,
                 content: `${message.content}\n\n${injection}`,

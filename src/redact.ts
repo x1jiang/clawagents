@@ -40,13 +40,26 @@ const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     compile("GOOGLE_KEY", "\\bAIza[0-9A-Za-z_\\-]{35}\\b"),
     compile(
         "GITHUB_TOKEN",
-        "\\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\\b",
+        "\\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\\b",
     ),
     compile("AWS_ACCESS_KEY_ID", "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b"),
+    // AWS secret access keys (40 chars, base64-ish, paired with KEY/SECRET name)
+    compile(
+        "AWS_SECRET_KEY",
+        "aws[_-]?(?:secret[_-]?access[_-]?key|secret)\\s*[:=]\\s*['\\\"]?" +
+            "([A-Za-z0-9/+=]{40})['\\\"]?",
+        "gi",
+    ),
     compile("SLACK_TOKEN", "\\bxox[abprs]-[A-Za-z0-9\\-]{10,}\\b"),
     compile(
         "JWT",
         "\\beyJ[A-Za-z0-9_=\\-]{4,}\\.[A-Za-z0-9_=\\-]{4,}\\.[A-Za-z0-9_.+/=\\-]{4,}\\b",
+    ),
+    // PEM private-key blocks (RSA, EC, DSA, OpenSSH, generic).
+    compile(
+        "PRIVATE_KEY_PEM",
+        "-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----" +
+            "[\\s\\S]*?-----END (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----",
     ),
     compile(
         "BEARER",
@@ -57,12 +70,23 @@ const BUILTIN_PATTERNS: readonly PatternEntry[] = [
             "(?:bearer\\s+|basic\\s+|token\\s+)?['\\\"]?[A-Za-z0-9_\\-.~+/=]{16,}['\\\"]?",
         "gi",
     ),
+    // URL basic-auth: `https://user:pass@host` (anchored on the scheme so we
+    // don't flag random "user:pass@…" text).
+    compile(
+        "URL_BASIC_AUTH",
+        "\\b(?:https?|ftp|ssh|git|mongodb|postgres(?:ql)?|mysql|redis|amqp|amqps)" +
+            "://[^\\s/@]+:[^\\s/@]+@",
+    ),
+    // Generic key=value assignments for known secret-looking names. The
+    // field name is matched anywhere in the line (no \b — so `OPENAI_API_KEY=…`
+    // works even though `_` is a word character). Mirrors the Python pattern.
     compile(
         "GENERIC_SECRET",
-        "\\b(?:api[_-]?key|api[_-]?secret|password|passwd|pwd|secret|" +
-            "client[_-]?secret|access[_-]?token|refresh[_-]?token|" +
-            "private[_-]?key|x[_-]?api[_-]?key)" +
-            "\\s*[:=]\\s*['\\\"]?([A-Za-z0-9_\\-+/=.~]{8,})['\\\"]?",
+        "(?:api[_-]?key|api[_-]?secret|client[_-]?secret|" +
+            "access[_-]?token|refresh[_-]?token|session[_-]?token|" +
+            "private[_-]?key|x[_-]?api[_-]?key|" +
+            "password|passwd|pwd|secret|credential)" +
+            "\\s*[:=]\\s*['\\\"]?([A-Za-z0-9_\\-+/=.~]{6,})['\\\"]?",
         "gi",
     ),
 ];

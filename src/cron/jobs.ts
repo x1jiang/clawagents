@@ -34,10 +34,24 @@ type CronParser = { parseExpression(expr: string, opts?: { currentDate?: Date })
 const _localRequire = createRequire(import.meta.url);
 let _cronParser: CronParser | null | undefined;
 
+/** Normalize cron-parser v4 (`parseExpression`) and v5 (`CronExpressionParser.parse`). */
+function normalizeCronParser(mod: unknown): CronParser | null {
+    if (!mod || typeof mod !== "object") return null;
+    const m = mod as Record<string, unknown>;
+    if (typeof m.parseExpression === "function") {
+        return { parseExpression: m.parseExpression as CronParser["parseExpression"] };
+    }
+    const CEP = m.CronExpressionParser as { parse?: CronParser["parseExpression"] } | undefined;
+    if (CEP && typeof CEP.parse === "function") {
+        return { parseExpression: (expr, opts) => CEP.parse!(expr, opts) };
+    }
+    return null;
+}
+
 function loadCronParser(): CronParser | null {
     if (_cronParser !== undefined) return _cronParser;
     try {
-        _cronParser = _localRequire("cron-parser") as CronParser;
+        _cronParser = normalizeCronParser(_localRequire("cron-parser"));
     } catch {
         _cronParser = null;
     }

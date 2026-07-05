@@ -269,7 +269,10 @@ function repairJson(text: string): Record<string, unknown> {
         else if ((ch === "}" || ch === "]") && stack.length && stack[stack.length - 1] === ch) stack.pop();
     }
 
-    const repaired = trimmed + stack.reverse().join("");
+    // If truncation happened mid-string ({"path": "/tmp/fi…), terminate the
+    // dangling string literal before appending the structural closers —
+    // otherwise the recoverable prefix was thrown away entirely.
+    const repaired = trimmed + (inString ? '"' : "") + stack.reverse().join("");
     try { return JSON.parse(repaired); } catch { /* fall through */ }
 
     for (let i = trimmed.length - 1; i > 0; i--) {
@@ -411,6 +414,7 @@ export class OpenAIProvider implements LLMProvider {
             content: msg?.content ?? "",
             model: this.model,
             tokensUsed: resp.usage?.total_tokens ?? 0,
+            promptTokens: resp.usage?.prompt_tokens ?? 0,
             ...(nativeToolCalls ? { toolCalls: nativeToolCalls } : {}),
         };
     }
@@ -431,6 +435,17 @@ export class OpenAIProvider implements LLMProvider {
 
             const chunks: string[] = [];
             let finalTokens = 0;
+            let finalPromptTokens = 0;
+            const toolsAcc: Record<number, { id: string; name: string; arguments: string }> = {};
+            const accumulatedCalls = (): NativeToolCall[] | undefined => {
+                const accKeys = Object.keys(toolsAcc).map(Number).sort((a, b) => a - b);
+                if (accKeys.length === 0) return undefined;
+                return accKeys.map((idx) => ({
+                    toolName: toolsAcc[idx].name,
+                    args: repairJson(toolsAcc[idx].arguments || "{}"),
+                    toolCallId: toolsAcc[idx].id,
+                }));
+            };
 
             try {
                 const stream = await this.client.chat.completions.create({
@@ -443,12 +458,16 @@ export class OpenAIProvider implements LLMProvider {
                     ...(tools ? { tools } : {}),
                 });
 
-                const toolsAcc: Record<number, { id: string; name: string; arguments: string }> = {};
-
                 for await (const chunk of withStallDetection(stream, RETRY.chunkStallMs)) {
                     if (options.signal?.aborted) {
                         try { stream.controller.abort(); } catch { /* best-effort abort */ }
-                        return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, partial: true };
+                        const aborted = accumulatedCalls();
+                        return {
+                            content: chunks.join(""), model: this.model,
+                            tokensUsed: finalTokens, promptTokens: finalPromptTokens,
+                            partial: true,
+                            ...(aborted ? { toolCalls: aborted } : {}),
+                        };
                     }
 
                     try {
@@ -469,34 +488,46 @@ export class OpenAIProvider implements LLMProvider {
                         }
                         if (chunk.usage) {
                             finalTokens = chunk.usage.total_tokens ?? 0;
+                            finalPromptTokens = chunk.usage.prompt_tokens ?? 0;
                         }
                     } catch {
                         // Malformed chunk — skip and continue
                     }
                 }
 
-                let nativeCalls: NativeToolCall[] | undefined;
-                const accKeys = Object.keys(toolsAcc).map(Number).sort((a, b) => a - b);
-                if (accKeys.length > 0) {
-                    nativeCalls = accKeys.map((idx) => ({
-                        toolName: toolsAcc[idx].name,
-                        args: repairJson(toolsAcc[idx].arguments || "{}"),
-                        toolCallId: toolsAcc[idx].id,
-                    }));
-                }
-
-                return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, ...(nativeCalls ? { toolCalls: nativeCalls } : {}) };
+                const nativeCalls = accumulatedCalls();
+                return {
+                    content: chunks.join(""), model: this.model,
+                    tokensUsed: finalTokens, promptTokens: finalPromptTokens,
+                    ...(nativeCalls ? { toolCalls: nativeCalls } : {}),
+                };
             } catch (err) {
                 lastError = err;
 
-                if (chunks.length > 0) {
+                // A mid-stream exception used to return the truncated text as
+                // a non-retried "final" answer. Retry retryable errors first;
+                // only surface a partial (with any accumulated tool calls)
+                // when retries are exhausted or the error is not retryable.
+                if (isRetryable(err) && attempt < RETRY.maxAttempts) {
+                    console.error(
+                        `  [openai] Stream interrupted after ${chunks.join("").length} chars — retrying`,
+                    );
+                    continue;
+                }
+                if (chunks.length > 0 || Object.keys(toolsAcc).length > 0) {
                     const partial = chunks.join("");
                     console.error(
                         `  [openai] Stream interrupted after ${partial.length} chars — returning partial content`,
                     );
-                    return { content: partial, model: this.model, tokensUsed: finalTokens, partial: true };
+                    const nativeCalls = accumulatedCalls();
+                    return {
+                        content: partial, model: this.model,
+                        tokensUsed: finalTokens, promptTokens: finalPromptTokens,
+                        partial: true,
+                        ...(nativeCalls ? { toolCalls: nativeCalls } : {}),
+                    };
                 }
-                if (!isRetryable(err)) break;
+                break;
             }
         }
 
@@ -682,19 +713,26 @@ export class GeminiProvider implements LLMProvider {
                         ?.filter((p: any) => typeof p?.text === "string" && !p?.thought)
                         .map((p: any) => p.text)
                         .join("") ?? "";
+                    // `tokensUsed` is input+output everywhere else; Gemini
+                    // used to record output-only (and no prompt), garbling
+                    // usage accounting.
+                    const retryPrompt = retryResp.usageMetadata?.promptTokenCount || 0;
                     return {
                         content: retryText,
                         model: this.model,
-                        tokensUsed: retryResp.usageMetadata?.candidatesTokenCount || 0,
+                        tokensUsed: retryPrompt + (retryResp.usageMetadata?.candidatesTokenCount || 0),
+                        promptTokens: retryPrompt,
                         ...(retryFnCalls?.length ? { toolCalls: retryFnCalls } : {}),
                         ...(retryRawParts ? { geminiParts: retryRawParts } : {}),
                     };
                 }
 
+                const promptTokens = resp.usageMetadata?.promptTokenCount || 0;
                 return {
                     content: extractedText,
                     model: this.model,
-                    tokensUsed: resp.usageMetadata?.candidatesTokenCount || 0,
+                    tokensUsed: promptTokens + (resp.usageMetadata?.candidatesTokenCount || 0),
+                    promptTokens,
                     ...(fnCalls?.length ? { toolCalls: fnCalls } : {}),
                     ...(rawParts ? { geminiParts: rawParts } : {}),
                 };
@@ -719,6 +757,7 @@ export class GeminiProvider implements LLMProvider {
 
             const chunks: string[] = [];
             let finalTokens = 0;
+            let finalPromptTokens = 0;
             const fnCalls: NativeToolCall[] = [];
             const allStreamParts: any[] = [];
             let lastFinishReason: string | undefined;
@@ -728,7 +767,7 @@ export class GeminiProvider implements LLMProvider {
 
                 for await (const chunk of withStallDetection(stream, RETRY.chunkStallMs)) {
                     if (options.signal?.aborted) {
-                        return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(allStreamParts.length ? { geminiParts: serializeGeminiParts(allStreamParts) } : {}) };
+                        return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(allStreamParts.length ? { geminiParts: serializeGeminiParts(allStreamParts) } : {}) };
                     }
 
                     try {
@@ -758,7 +797,9 @@ export class GeminiProvider implements LLMProvider {
                             }
                         }
                         if ((chunk as any).usageMetadata) {
-                            finalTokens = (chunk as any).usageMetadata.candidatesTokenCount || 0;
+                            const um = (chunk as any).usageMetadata;
+                            finalPromptTokens = um.promptTokenCount || 0;
+                            finalTokens = finalPromptTokens + (um.candidatesTokenCount || 0);
                         }
                     } catch {
                         // Malformed chunk — skip and continue
@@ -782,29 +823,39 @@ export class GeminiProvider implements LLMProvider {
                         ?.filter((p: any) => typeof p?.text === "string" && !p?.thought)
                         .map((p: any) => p.text)
                         .join("") ?? "";
+                    const retryPrompt = retryResp.usageMetadata?.promptTokenCount || 0;
                     return {
                         content: retryText,
                         model: this.model,
-                        tokensUsed: retryResp.usageMetadata?.candidatesTokenCount || 0,
+                        tokensUsed: retryPrompt + (retryResp.usageMetadata?.candidatesTokenCount || 0),
+                        promptTokens: retryPrompt,
                         ...(retryFnCalls?.length ? { toolCalls: retryFnCalls } : {}),
                         ...(retryRawParts ? { geminiParts: retryRawParts } : {}),
                     };
                 }
 
                 const rawParts = serializeGeminiParts(allStreamParts);
-                return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
+                return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
             } catch (err) {
                 lastError = err;
 
-                if (chunks.length > 0) {
+                // Retry retryable mid-stream failures before surfacing a
+                // truncated partial; include accumulated tool calls when we do.
+                if (isRetryable(err) && attempt < RETRY.maxAttempts) {
+                    console.error(
+                        `  [gemini] Stream interrupted after ${chunks.join("").length} chars — retrying`,
+                    );
+                    continue;
+                }
+                if (chunks.length > 0 || fnCalls.length > 0) {
                     const partial = chunks.join("");
                     console.error(
                         `  [gemini] Stream interrupted after ${partial.length} chars — returning partial content`,
                     );
                     const rawParts = serializeGeminiParts(allStreamParts);
-                    return { content: partial, model: this.model, tokensUsed: finalTokens, partial: true, ...(rawParts ? { geminiParts: rawParts } : {}) };
+                    return { content: partial, model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
                 }
-                if (!isRetryable(err)) break;
+                break;
             }
         }
 
@@ -856,10 +907,23 @@ export class AnthropicProvider implements LLMProvider {
             if (m.role === "system") {
                 systemParts.push(typeof m.content === "string" ? m.content : String(m.content));
             } else if (m.role === "tool" && m.toolCallId) {
-                apiMessages.push({
-                    role: "user",
-                    content: [{ type: "tool_result", tool_use_id: m.toolCallId, content: m.content }],
-                });
+                const block = { type: "tool_result", tool_use_id: m.toolCallId, content: m.content };
+                // Coalesce consecutive tool results into ONE user message —
+                // Anthropic requires every tool_result block answering a single
+                // assistant turn (parallel tool calls) to be in the same user
+                // message, otherwise the API rejects the transcript.
+                const prev = apiMessages[apiMessages.length - 1];
+                const prevContent = prev?.content as Array<Record<string, unknown>> | undefined;
+                if (
+                    prev?.role === "user"
+                    && Array.isArray(prevContent)
+                    && prevContent.length > 0
+                    && prevContent[0]?.type === "tool_result"
+                ) {
+                    prevContent.push(block);
+                } else {
+                    apiMessages.push({ role: "user", content: [block] });
+                }
             } else if (m.role === "assistant" && m.toolCallsMeta) {
                 const blocks: Array<Record<string, unknown>> = [];
                 if (m.content) blocks.push({ type: "text", text: m.content });
@@ -910,11 +974,22 @@ export class AnthropicProvider implements LLMProvider {
                 input_schema: {
                     type: "object",
                     properties: Object.fromEntries(
-                        Object.entries(s.parameters).map(([k, v]) => [k, { type: v.type, description: v.description }]),
+                        Object.entries(s.parameters).map(([k, v]) => {
+                            const prop: Record<string, unknown> = { type: v.type, description: v.description };
+                            // Array parameters must carry their `items` schema —
+                            // dropping it made Claude guess element types (or the
+                            // API reject the tool).
+                            if (v.type === "array") prop.items = v.items ?? { type: "string" };
+                            return [k, prop];
+                        }),
                     ),
                     required: Object.entries(s.parameters).filter(([_, v]) => v.required).map(([k]) => k),
                 },
             }));
+        }
+
+        if (options?.onChunk) {
+            return this.streamWithRetry(kwargs, options);
         }
 
         return withRetry("anthropic", async () => {
@@ -942,6 +1017,122 @@ export class AnthropicProvider implements LLMProvider {
                 promptTokens: usage?.input_tokens ?? 0,
             };
         });
+    }
+
+    /**
+     * Streaming path (previously `onChunk`/`signal` were silently ignored and
+     * the CLI showed nothing until the full Claude response landed). Mirrors
+     * the Python provider: message_start carries prompt/cache usage,
+     * content_block_delta carries text + partial tool-call JSON, and
+     * message_delta carries the final output token count.
+     */
+    private async streamWithRetry(
+        kwargs: Record<string, unknown>,
+        options: StreamOptions,
+    ): Promise<LLMResponse> {
+        let lastError: unknown;
+
+        for (let attempt = 0; attempt <= RETRY.maxAttempts; attempt++) {
+            if (attempt > 0) {
+                const delay = jitteredDelay(attempt - 1);
+                console.error(`  [anthropic] Stream retry ${attempt}/${RETRY.maxAttempts} after ${Math.round(delay)}ms`);
+                await sleep(delay);
+            }
+
+            const chunks: string[] = [];
+            const toolCalls: NativeToolCall[] = [];
+            let currentTool: { id: string; name: string; inputJson: string } | null = null;
+            let outputTokens = 0;
+            let promptTokens = 0;
+            let cacheCreation = 0;
+            let cacheRead = 0;
+
+            const partialResponse = (): LLMResponse => ({
+                content: chunks.join(""),
+                model: this.model,
+                tokensUsed: promptTokens + outputTokens,
+                promptTokens,
+                partial: true,
+                ...(toolCalls.length ? { toolCalls } : {}),
+                cacheCreationTokens: cacheCreation,
+                cacheReadTokens: cacheRead,
+            });
+
+            try {
+                const stream = this.client.messages.stream(kwargs);
+
+                for await (const event of withStallDetection(stream as AsyncIterable<any>, RETRY.chunkStallMs)) {
+                    if (options.signal?.aborted) {
+                        try { stream.controller?.abort?.(); } catch { /* best-effort abort */ }
+                        return partialResponse();
+                    }
+
+                    if (event.type === "message_start" && event.message?.usage) {
+                        const u = event.message.usage;
+                        promptTokens = u.input_tokens ?? 0;
+                        cacheCreation = u.cache_creation_input_tokens ?? 0;
+                        cacheRead = u.cache_read_input_tokens ?? 0;
+                    } else if (event.type === "content_block_start") {
+                        if (event.content_block?.type === "tool_use") {
+                            currentTool = {
+                                id: event.content_block.id,
+                                name: event.content_block.name,
+                                inputJson: "",
+                            };
+                        }
+                    } else if (event.type === "content_block_delta") {
+                        if (typeof event.delta?.text === "string") {
+                            chunks.push(event.delta.text);
+                            try { options.onChunk!(event.delta.text); } catch { /* callback error — isolated */ }
+                        } else if (typeof event.delta?.partial_json === "string" && currentTool) {
+                            currentTool.inputJson += event.delta.partial_json;
+                        }
+                    } else if (event.type === "content_block_stop") {
+                        if (currentTool) {
+                            toolCalls.push({
+                                toolName: currentTool.name,
+                                args: repairJson(currentTool.inputJson || "{}"),
+                                toolCallId: currentTool.id,
+                            });
+                            currentTool = null;
+                        }
+                    } else if (event.type === "message_delta") {
+                        if (typeof event.usage?.output_tokens === "number") {
+                            outputTokens = event.usage.output_tokens;
+                        }
+                    }
+                }
+
+                return {
+                    content: chunks.join(""),
+                    model: this.model,
+                    tokensUsed: promptTokens + outputTokens,
+                    promptTokens,
+                    ...(toolCalls.length ? { toolCalls } : {}),
+                    cacheCreationTokens: cacheCreation,
+                    cacheReadTokens: cacheRead,
+                };
+            } catch (err) {
+                lastError = err;
+                // Retry retryable mid-stream failures before surfacing a
+                // truncated partial; include accumulated tool calls when we do.
+                if (isRetryable(err) && attempt < RETRY.maxAttempts) {
+                    console.error(
+                        `  [anthropic] Stream interrupted after ${chunks.join("").length} chars — retrying`,
+                    );
+                    continue;
+                }
+                if (chunks.length > 0 || toolCalls.length > 0) {
+                    console.error(
+                        `  [anthropic] Stream interrupted after ${chunks.join("").length} chars — returning partial content`,
+                    );
+                    return partialResponse();
+                }
+                break;
+            }
+        }
+
+        throw lastError;
     }
 }
 

@@ -26,6 +26,7 @@ import type { ToolRegistry, ParsedToolCall, ToolResult } from "../tools/registry
 import { writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setOverrides } from "../config/features.js";
+import { redactObj } from "../redact.js";
 import { RunContext, type ApprovalRecord } from "../run-context.js";
 import { Usage } from "../usage.js";
 import { streamEventFromKind, type StreamEvent } from "../stream-events.js";
@@ -769,6 +770,10 @@ const COMPACTABLE_TOOLS = new Set([
 ]);
 
 const MICRO_COMPACT_KEEP_RECENT = 3;
+// Only micro-compact once the transcript actually uses a meaningful share of
+// the context window. Running it unconditionally blanked all but the last 3
+// read/grep/exec results every round, degrading multi-file tasks at low usage.
+const MICRO_COMPACT_MIN_USAGE_RATIO = 0.4;
 
 export function microCompactToolResults(
     messages: LLMMessage[],
@@ -971,7 +976,11 @@ CRITICAL: Preserve these verbatim (do not paraphrase or omit):
 
 function findSafeSplitIndex(nonSystem: LLMMessage[], desiredRecent: number): number {
     let split = Math.max(0, nonSystem.length - desiredRecent);
-    while (split < nonSystem.length - 1) {
+    // Bound is < nonSystem.length, NOT length - 1: with the tighter bound a
+    // tail run of ≥N tool messages left the last orphan tool result in
+    // `recent` while its paired assistant tool_call got summarized away →
+    // provider 400.
+    while (split < nonSystem.length) {
         const msg = nonSystem[split]!;
         if (msg.role === "tool" && msg.toolCallId) {
             split++;
@@ -1220,13 +1229,17 @@ function getHistoryDir(): string {
     return resolve(process.cwd(), ".clawagents", "history");
 }
 
-function offloadHistory(messages: LLMMessage[]): string | null {
+export function offloadHistory(messages: LLMMessage[]): string | null {
     try {
         const historyDir = getHistoryDir();
         mkdirSync(historyDir, { recursive: true });
         const ts = Date.now();
         const path = resolve(historyDir, `compacted_${ts}_${messages.length}msgs.json`);
-        const data = messages.map((m) => ({ role: m.role, content: m.content }));
+        // The offload file is a plain-text artifact on disk, so secrets the
+        // agent saw mid-run (bearer tokens, .env contents, …) must not be
+        // persisted verbatim — apply the same redaction as every other
+        // persistence surface.
+        const data = redactObj(messages.map((m) => ({ role: m.role, content: m.content })));
         writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
         return path;
     } catch {
@@ -1460,7 +1473,9 @@ export async function runAgentGraph<TContext = unknown>(
         if (onStreamEvent) {
             try {
                 const ev = streamEventFromKind(kind as any, data);
-                void onStreamEvent(ev);
+                // Swallow async rejections too — `void promise` left them
+                // unhandled, which can kill the whole process.
+                Promise.resolve(onStreamEvent(ev)).catch(() => { /* observer errors should not break the run */ });
             } catch { /* observer errors should not break the run */ }
         }
     };
@@ -1559,7 +1574,6 @@ export async function runAgentGraph<TContext = unknown>(
     ];
 
     // ── Session backend preload (pluggable Session protocol) ───────────
-    let sessionStartCursor = messages.length;
     if (sessionBackend) {
         try {
             const preloaded = await sessionBackend.getItems(sessionPreloadLimit ?? undefined);
@@ -1567,11 +1581,29 @@ export async function runAgentGraph<TContext = unknown>(
                 messages.push(...preloaded);
                 emit("context", { message: `session: preloaded ${preloaded.length} item(s) from ${sessionBackend.constructor.name}` });
             }
-            sessionStartCursor = messages.length;
         } catch (err) {
             emit("warn", { message: `session preload failed: ${err}` });
         }
     }
+
+    // Identity-based tracking of preloaded vs. run-appended messages.
+    // A numeric cursor breaks when compaction rebuilds `messages` or
+    // dangling-tool-call patching inserts items mid-list, silently losing
+    // (or duplicating) turns at persist time. We track message *objects*
+    // instead: anything unseen at the top of a round was appended by the
+    // run and gets persisted; anything synthesized by the pre-LLM
+    // transform pipeline (compaction summaries, patch inserts, prompt
+    // injections) is marked seen without being persisted.
+    const sessionInitialSet = new Set<LLMMessage>(messages);
+    const sessionSeen = new Set<LLMMessage>(messages);
+    const sessionNewMsgs: LLMMessage[] = [];
+    const sessionNoteMessages = (track: boolean): void => {
+        for (const m of messages) {
+            if (sessionSeen.has(m)) continue;
+            sessionSeen.add(m);
+            if (track) sessionNewMsgs.push(m);
+        }
+    };
 
     messages.push({ role: "user", content: task });
 
@@ -1660,6 +1692,9 @@ export async function runAgentGraph<TContext = unknown>(
         }
 
     let overflowRetries = 0;
+    // Set when a handoff installs the combined parent+child transcript on
+    // ``state.messages`` — the post-loop assignment must not overwrite it.
+    let handoffTranscriptSet = false;
     const ac = new AbortController();
     const onSigint = () => {
         emit("warn", { message: "interrupted" });
@@ -1703,6 +1738,11 @@ export async function runAgentGraph<TContext = unknown>(
                 break;
             }
 
+            // One increment per loop round, unconditionally — previously only
+            // a handful of exit paths bumped this, so normal multi-round runs
+            // reported "1 iteration" in events and the session writer.
+            state.iterations += 1;
+
             // Emit typed turn_started marker (openai-agents parity).
             emit("turn_started", { iteration: roundIdx, agent: agentName });
             await fireHook("onLLMStart", { iteration: roundIdx, messages });
@@ -1727,9 +1767,17 @@ export async function runAgentGraph<TContext = unknown>(
             // Write-ahead log: persist last message before API call (Claude Code pattern)
             walWrite(messages);
 
+            // Capture messages appended by the previous round *before* the
+            // transform pipeline below can compact/rebuild the list.
+            sessionNoteMessages(true);
+
             // Patch dangling tool calls before sending to LLM
             messages = patchDanglingToolCalls(messages);
-            messages = microCompactToolResults(messages);  // Claude Code pattern: clear old tool results
+            // Claude Code pattern: clear old tool results — but only when the
+            // transcript is actually filling up (see MICRO_COMPACT_MIN_USAGE_RATIO).
+            if (estimateMessagesTokens(messages, tokenMultiplier) > contextWindow * MICRO_COMPACT_MIN_USAGE_RATIO) {
+                messages = microCompactToolResults(messages);
+            }
             messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
             messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName, runContext);
 
@@ -1753,6 +1801,11 @@ export async function runAgentGraph<TContext = unknown>(
                     else emit("warn", { message: "beforeLLM returned invalid value — ignored" });
                 } catch (hookErr) { emit("warn", { message: `beforeLLM hook error: ${hookErr}` }); }
             }
+
+            // Framework-synthesized messages (compaction summaries, dangling
+            // tool-call patches, hook/prompt injections) are regenerated per
+            // run — mark them seen so they are never persisted to the session.
+            sessionNoteMessages(false);
 
             let response: LLMResponse;
             try {
@@ -1831,9 +1884,17 @@ export async function runAgentGraph<TContext = unknown>(
                     }
                     const observedRatio = contextWindow / Math.max(estimateMessagesTokens(messages, 1.0), 1);
                     tokenMultiplier = Math.min(observedRatio * 1.1, 3.0);
-                    emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)} (retry ${overflowRetries}/${MAX_OVERFLOW_RETRIES})` });
+                    // Also shrink the effective window: the multiplier is
+                    // capped at 3.0, so with a wildly overstated
+                    // CONTEXT_WINDOW (e.g. 1M configured on a 128K model)
+                    // compaction below would never fire and every retry
+                    // would overflow again.
+                    contextWindow = Math.max(Math.floor(contextWindow * 0.5), 16_000);
+                    emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)}, shrunk effective window to ${contextWindow} (retry ${overflowRetries}/${MAX_OVERFLOW_RETRIES})` });
                     messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
                     messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName, runContext);
+                    // Don't persist recovery-compaction artifacts to the session.
+                    sessionNoteMessages(false);
                     continue;
                 }
 
@@ -1878,8 +1939,13 @@ export async function runAgentGraph<TContext = unknown>(
                 }
 
                 // ── Advisor: final check before declaring done ──
+                // Track whether the final-check path already appended the
+                // assistant message: when the advisor errored or returned
+                // nothing, the fall-through below appended it a second time.
+                let finalAssistantAppended = false;
                 if (advisorLLM && advisorCallCount > 0 && advisorCallCount < advisorMaxCalls && state.toolCalls > 0) {
                     messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
+                    finalAssistantAppended = true;
                     await consultAdvisor(messages, "final-check");
                     // If advisor injected guidance, let the LLM process it
                     if (messages[messages.length - 1]?.content?.toString().startsWith("[Advisor Guidance]")) {
@@ -1898,9 +1964,10 @@ export async function runAgentGraph<TContext = unknown>(
                 }
                 state.result = sanitizeAssistantText(response.content);
                 state.status = "done";
-                state.iterations += 1;
                 emit("final_content", { content: state.result });
-                messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
+                if (!finalAssistantAppended) {
+                    messages.push({ role: "assistant", content: response.content, thinking: _thinkingContent });
+                }
                 break;
             }
 
@@ -1937,7 +2004,6 @@ export async function runAgentGraph<TContext = unknown>(
                             role: "user",
                             content: `[Handoff Error] Could not resolve target agent: ${resolveErr}`,
                         });
-                        state.iterations += 1;
                         continue;
                     }
 
@@ -1979,8 +2045,8 @@ export async function runAgentGraph<TContext = unknown>(
 
                     const handoffPayload: import("../handoffs.js").HandoffInputData<TContext> = {
                         inputHistory: [...messages],
-                        preHandoffItems: messages.slice(0, sessionStartCursor) as unknown[],
-                        newItems: messages.slice(sessionStartCursor) as unknown[],
+                        preHandoffItems: messages.filter((m) => sessionInitialSet.has(m)) as unknown[],
+                        newItems: messages.filter((m) => !sessionInitialSet.has(m)) as unknown[],
                         runContext,
                     };
                     let filteredPayload = handoffPayload;
@@ -2066,7 +2132,6 @@ export async function runAgentGraph<TContext = unknown>(
                             role: "user",
                             content: `[Handoff Error] Target agent failed: ${runErr}`,
                         });
-                        state.iterations += 1;
                         continue;
                     }
 
@@ -2076,8 +2141,8 @@ export async function runAgentGraph<TContext = unknown>(
                         ? childState.finalOutput
                         : childState.result;
                     state.toolCalls += childState.toolCalls;
-                    state.iterations += 1;
                     state.messages = [...messages, ...childState.messages];
+                    handoffTranscriptSet = true;
                     break;
                 }
             }
@@ -2086,7 +2151,6 @@ export async function runAgentGraph<TContext = unknown>(
                 emit("warn", { message: `circuit breaker tripped (${loopTracker["noProgressCount"]} no-progress calls) — breaking` });
                 state.status = "done";
                 state.result = "Circuit breaker: too many tool calls with no progress. Stopping.";
-                state.iterations += 1;
                 break;
             }
 
@@ -2099,7 +2163,6 @@ export async function runAgentGraph<TContext = unknown>(
                 emit("warn", { message: pollHit.message ?? "known poll loop" });
                 state.status = "done";
                 state.result = pollHit.message ?? "Known poll loop detected. Stopping.";
-                state.iterations += 1;
                 break;
             }
 
@@ -2108,7 +2171,6 @@ export async function runAgentGraph<TContext = unknown>(
                 emit("warn", { message: `tool loop detected (${names}) — breaking` });
                 state.status = "done";
                 state.result = `Tool loop detected (${names}). Stopping.`;
-                state.iterations += 1;
                 break;
             }
 
@@ -2117,7 +2179,6 @@ export async function runAgentGraph<TContext = unknown>(
                 emit("warn", { message: `ping-pong oscillation detected (${recent.join(" ↔ ")}) — breaking` });
                 state.status = "done";
                 state.result = "Ping-pong loop detected between tools. Stopping.";
-                state.iterations += 1;
                 break;
             }
 
@@ -2136,7 +2197,6 @@ export async function runAgentGraph<TContext = unknown>(
                         ? `[System] You are re-calling the same execute command with the same arguments. The command already ran; if the previous result has success=false or a nonzero exit_code, treat stdout/stderr as diagnostic feedback, not as a tool failure. Read the prior output, then edit code or inspect new evidence before trying again. Do not rerun this command until something relevant changed. If you believe the task is complete, provide your final answer now.`
                         : `[System] You are re-calling ${repeatedNames} with the same arguments. You already have the result in the conversation above. Use the existing data instead of re-reading. If you believe the task is complete, provide your final answer now.`,
                 });
-                state.iterations += 1;
                 continue;
             }
 
@@ -2211,7 +2271,12 @@ export async function runAgentGraph<TContext = unknown>(
                         }
                     } catch (apprErr) { emit("warn", { message: `approvalHandler error: ${apprErr}` }); }
                 }
-                if (existingApproval === undefined && approvedByUser === undefined && inputGuardrails.length === 0 && !approvalHandler) {
+                // Default-allow when no approval gate is configured. Input
+                // guardrails vet the *task text* before round 0, not tool
+                // calls — gating on them here meant configuring any guardrail
+                // (without an approvalHandler) rejected every single tool
+                // call, contradicting the parallel path.
+                if (existingApproval === undefined && approvedByUser === undefined && !approvalHandler) {
                     approvedByUser = true; // default: no approval gate configured → allow
                 }
                 if (approvedByUser === undefined) {
@@ -2303,6 +2368,7 @@ export async function runAgentGraph<TContext = unknown>(
 
                 emit("tool_result", {
                     name: call.toolName,
+                    callId,
                     success: toolResult.success,
                     preview,
                 });
@@ -2406,13 +2472,37 @@ export async function runAgentGraph<TContext = unknown>(
                 }
 
             } else {
-                let approvedCalls = toolCalls;
-                let approvedOrigIndices = toolCalls.map((_, idx) => idx);
+                // ── External pre_tool_use hook (parallel) ──
+                // Mirror the single-call path: an external policy gate must
+                // not be bypassable by batching a forbidden call with another.
+                let candidatePairs: Array<[number, import("../tools/registry.js").ParsedToolCall]> =
+                    toolCalls.map((c, idx) => [idx, c] as [number, import("../tools/registry.js").ParsedToolCall]);
+                if (extHookRunner) {
+                    const extPairs: Array<[number, import("../tools/registry.js").ParsedToolCall]> = [];
+                    for (const [origIdx, c0] of candidatePairs) {
+                        let c = c0;
+                        try {
+                            const { allowed, args: extArgs } = await extHookRunner.preToolUse(c.toolName, c.args);
+                            if (!allowed) {
+                                emit("tool_skipped", { name: c.toolName, reason: "blocked by external hook" });
+                                messages.push({ role: "user", content: `[Tool Skipped] ${c.toolName} was blocked by external hook.` });
+                                continue;
+                            }
+                            c = { toolName: c.toolName, args: extArgs };
+                        } catch (hookErr) { emit("warn", { message: `external preToolUse hook error: ${hookErr}` }); }
+                        extPairs.push([origIdx, c]);
+                    }
+                    candidatePairs = extPairs;
+                    if (candidatePairs.length === 0) continue;
+                }
+
+                let approvedCalls = candidatePairs.map(([, c]) => c);
+                let approvedOrigIndices = candidatePairs.map(([i]) => i);
                 if (beforeTool) {
                     const remapped: import("../tools/registry.js").ParsedToolCall[] = [];
                     const remappedOrigIndices: number[] = [];
-                    for (let idx = 0; idx < toolCalls.length; idx++) {
-                        const call = toolCalls[idx]!;
+                    for (let idx = 0; idx < candidatePairs.length; idx++) {
+                        const [origIdx, call] = candidatePairs[idx]!;
                         let approved = true;
                         let remappedCall = call;
                         try {
@@ -2430,7 +2520,7 @@ export async function runAgentGraph<TContext = unknown>(
                         if (!approved) emit("tool_skipped", { name: call.toolName });
                         else {
                             remapped.push(remappedCall);
-                            remappedOrigIndices.push(idx);
+                            remappedOrigIndices.push(origIdx);
                         }
                     }
                     approvedCalls = remapped;
@@ -2531,6 +2621,23 @@ export async function runAgentGraph<TContext = unknown>(
                 for (let j = 0; j < approvedCalls.length; j++) {
                     const call = approvedCalls[j]!;
                     let result = results[j]!;
+                    // External post_tool_use hook (parallel) — parity with the
+                    // single-call path so result-rewriting policy hooks apply.
+                    if (extHookRunner) {
+                        try {
+                            const extResult = await extHookRunner.postToolUse(
+                                call.toolName, call.args,
+                                { success: result.success, output: String(result.output).slice(0, 1000) },
+                            );
+                            if ("success" in extResult && "output" in extResult) {
+                                result = {
+                                    success: extResult.success as boolean,
+                                    output: extResult.output as string,
+                                    error: extResult.error as string | undefined,
+                                };
+                            }
+                        } catch (hookErr) { emit("warn", { message: `external postToolUse hook error: ${hookErr}` }); }
+                    }
                     if (afterTool) {
                         try {
                             const hooked = afterTool(call.toolName, call.args, result);
@@ -2560,9 +2667,21 @@ export async function runAgentGraph<TContext = unknown>(
                     }
                     emit("tool_result", {
                         name: call.toolName,
+                        callId: approvedCallIds[j] ?? "",
                         success: result.success,
                         preview,
                     });
+
+                    // Session: write tool result (parity with single-call path)
+                    if (sessionWriter) {
+                        sessionWriter.writeToolResult(
+                            approvedCallIds[j] ?? "",
+                            call.toolName,
+                            result.success,
+                            String(result.output).slice(0, 2000),
+                            !result.success ? result.error : undefined,
+                        );
+                    }
 
                     if (typeof output === "string") {
                         callSummaries.push(`${call.toolName}(${JSON.stringify(call.args)}) => ${output}`);
@@ -2683,7 +2802,6 @@ export async function runAgentGraph<TContext = unknown>(
             emit("warn", { message: `reached max ${effectiveMaxRounds} tool rounds` });
             state.status = "done";
             state.result = state.result || `Reached maximum of ${effectiveMaxRounds} tool rounds.`;
-            state.iterations += 1;
         }
     } catch (err) {
         emit("error", { phase: "agent_loop", message: String(err) });
@@ -2694,7 +2812,10 @@ export async function runAgentGraph<TContext = unknown>(
     }
 
     const elapsed = (Date.now() - t0) / 1000;
-    state.messages = messages;
+    // Don't clobber the combined parent+child transcript a handoff installed.
+    if (!handoffTranscriptSet) {
+        state.messages = messages;
+    }
 
     // Session: write final turn_completed
     if (sessionWriter) {
@@ -2808,7 +2929,7 @@ export async function runAgentGraph<TContext = unknown>(
                 else emit("warn", { message: `outputType.safeParse failed: ${String((parsed as { error: unknown }).error)}` });
             }
             if (state.finalOutput !== undefined) {
-                emit("final_output", { finalOutput: state.finalOutput });
+                emit("final_output", { finalOutput: state.finalOutput, output: state.finalOutput, raw: state.result });
             }
         } catch (err) {
             emit("warn", { message: `outputType parse error: ${err}` });
@@ -2818,8 +2939,8 @@ export async function runAgentGraph<TContext = unknown>(
     // ── Session backend persistence (final flush) ─────────────────
     if (sessionBackend) {
         try {
-            const newItems = messages.slice(sessionStartCursor);
-            if (newItems.length > 0) await sessionBackend.addItems(newItems);
+            sessionNoteMessages(true);
+            if (sessionNewMsgs.length > 0) await sessionBackend.addItems(sessionNewMsgs);
         } catch (err) {
             emit("warn", { message: `session persistence failed: ${err}` });
         }

@@ -43,6 +43,10 @@ export class AgentSession {
     private permissionRequester?: PermissionRequester;
     private toolIdsByName: Map<string, string[]> = new Map();
     private toolArgsById: Map<string, Record<string, unknown>> = new Map();
+    /** Explicit caller call-id → ACP toolCallId. When the agent loop supplies
+     *  its own call id we match on it directly; name/FIFO matching alone
+     *  mis-pairs out-of-order completions of same-named parallel calls. */
+    private toolIdByCallId: Map<string, string> = new Map();
     private _emitted: Record<string, unknown>[] = [];
     private _stopReason: StopReason | null = null;
 
@@ -146,6 +150,8 @@ export class AgentSession {
             const name = String(payload.name ?? payload.tool ?? "tool");
             const args = coerceArgs(payload.arguments ?? payload.args);
             const tc = toolCallStart(name, args);
+            const explicit = payload.call_id ?? payload.callId ?? payload.id;
+            if (explicit) this.toolIdByCallId.set(String(explicit), tc.toolCallId);
             const queue = this.toolIdsByName.get(name) ?? [];
             queue.push(tc.toolCallId);
             this.toolIdsByName.set(name, queue);
@@ -160,8 +166,21 @@ export class AgentSession {
             k === "tool_end"
         ) {
             const name = String(payload.name ?? payload.tool ?? "tool");
+            // Prefer exact call-id matching; FIFO-by-name mis-pairs
+            // out-of-order completions of same-named parallel calls.
+            const explicit = payload.call_id ?? payload.callId ?? payload.id;
+            let tcId: string | undefined;
             const queue = this.toolIdsByName.get(name);
-            const tcId = queue && queue.length > 0 ? queue.shift()! : makeToolCallId();
+            if (explicit && this.toolIdByCallId.has(String(explicit))) {
+                tcId = this.toolIdByCallId.get(String(explicit))!;
+                this.toolIdByCallId.delete(String(explicit));
+                if (queue) {
+                    const at = queue.indexOf(tcId);
+                    if (at >= 0) queue.splice(at, 1);
+                }
+            } else {
+                tcId = queue && queue.length > 0 ? queue.shift()! : makeToolCallId();
+            }
             const args = this.toolArgsById.get(tcId);
             this.toolArgsById.delete(tcId);
             const errorVal = payload.error;
