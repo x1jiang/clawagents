@@ -6,6 +6,18 @@ A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.10.0**
 > parallel hook enforcement, provider token accounting, Anthropic streaming,
 > context-window recovery, and agent-loop telemetry fixes. See [Changelog](#changelog).
 
+### Companion: Python v6.10.1 (PyPI)
+
+The TypeScript package remains **v6.10.0** (no TS code changes in this cut).
+Install the matching Python patch with `pip install -U clawagents` (**6.10.1**):
+
+- Gemini/OpenAI array tool-schema `items` (Gemini 400 fix)
+- GPT-5.5 / GPT-5.6 Chat Completions + tools (`reasoning_effort=none`)
+- Orphan tool-message sanitization + safer session preload
+- MCP event-loop reconnect for embedded/threaded hosts
+- `skills_exclude` on `create_claw_agent`
+- Streaming `assistant_delta` / intermediate assistant events
+
 ### New In v6.10.0
 
 - **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
@@ -937,6 +949,13 @@ development.
 ---
 
 ## Changelog
+
+### Companion note — Python v6.10.1 (July 2026)
+
+No TypeScript package bump. Documented here so GitHub readers see the PyPI
+companion: Gemini tool-schema `items`, GPT-5.5/5.6 Chat Completions tool compat,
+MCP loop reconnect, orphan tool sanitization, `skills_exclude`, and richer
+Python typed-stream events. Install via `pip install -U 'clawagents>=6.10.1'`.
 
 ### v6.10.0 — Reliability and parity release (July 2026)
 
