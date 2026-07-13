@@ -1,24 +1,30 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. ~3,200 LOC TypeScript. **v6.10.0**
+A lean, full-stack agentic protocol. TypeScript sibling of [`clawagents` on PyPI](https://pypi.org/project/clawagents/). **v6.12.11**
 
-> **v6.10.0 (July 2026)** — Reliability and parity release: session persistence,
-> parallel hook enforcement, provider token accounting, Anthropic streaming,
-> context-window recovery, and agent-loop telemetry fixes. See [Changelog](#changelog).
+> **v6.12.11 (July 2026)** — Skill loader + ACP parity with Python 6.12.10/6.12.11: `disable-model-invocation`, safer requires parsing, resource disclosure, and ACP `tool_call` schema fixes. See [Changelog](#changelog).
 
-### Companion: Python v6.10.1 (PyPI)
+### Companion: Python v6.12.11 (PyPI)
 
-The TypeScript package remains **v6.10.0** (no TS code changes in this cut).
-Install the matching Python patch with `pip install -U clawagents` (**6.10.1**):
+```bash
+pip install -U 'clawagents>=6.12.11'
+```
 
-- Gemini/OpenAI array tool-schema `items` (Gemini 400 fix)
-- GPT-5.5 / GPT-5.6 Chat Completions + tools (`reasoning_effort=none`)
-- Orphan tool-message sanitization + safer session preload
-- MCP event-loop reconnect for embedded/threaded hosts
-- `skills_exclude` on `create_claw_agent`
-- Streaming `assistant_delta` / intermediate assistant events
+Highlights from the matching Python line (also reflected in this TS cut where applicable):
 
-### New In v6.10.0
+- Skill progressive disclosure with per-turn ranking, dynamic catalog budget, `list_skills` / `use_skill`
+- `disable-model-invocation` for user-only skills
+- Host-friendly dotenv (`CLAWAGENTS_SKIP_DOTENV` / no host-key clobber)
+- Responses / `wire_api` / `ssl_verify` / `reasoning_effort` for GPT-5.x and custom gateways
+- Native AWS Bedrock + VS Code extension **1.0.30**
+
+### New In v6.12.11
+
+- **Version + docs** aligned with Python **6.12.11** and VS Code **1.0.30**.
+- **Skills** — Agent Skills–style loader hardening (precedence, requires scoping, ineligibility reasons, resource listing, `disable-model-invocation`).
+- **ACP** — required `title` / `kind` on tool calls; content wrapping for spec-strict clients.
+
+### Previously In v6.10.0
 
 - **Session persistence** — identity-based message tracking survives compaction and dangling-tool-call patching without losing or duplicating persisted turns.
 - **Parallel tool policy hooks** — external pre/post hooks and session writes apply in parallel batches; policy gates cannot be bypassed by batching.
@@ -27,43 +33,6 @@ Install the matching Python patch with `pip install -U clawagents` (**6.10.1**):
 - **Context & loop fixes** — accurate multimodal token counts; safe compaction split boundaries; deduped prompt injection; micro-compact gated on usage; overflow recovery shrinks effective window; advisor duplicate-message and handoff transcript fixes; one iteration increment per loop round.
 - **Infrastructure** — command-queue barrier exclusivity; `onStreamEvent` async rejection handling; stream-event key drift fixed; input-guardrail approval no longer blocks all tool calls; background jobs finalize on `close`; coordinator stdin EPIPE guard; bounded gateway WS sessions; ACP tool-id matching; cron-parser v5 compatibility.
 
-### Previously In v6.9.2
-
-- **Bash validator hardening** — peels launcher wrappers (`env`, `sudo`, `timeout`, `eval`, …) so inner destructive commands can't bypass BLOCK rules; normalizes root-like paths; handles alias bypass (`\rm`).
-- **Gateway CORS safe defaults** — loopback-only origins by default instead of `*`; disables credentials when wildcard is explicitly configured.
-- **Plan-mode escape fix** — agent-as-tool subagents now inherit the parent's permission mode.
-- **Provider parity** — strips `__CACHE_BOUNDARY__` from OpenAI/Gemini prompts; Anthropic honours `temperature=0`; Gemini skips malformed image URLs; OpenAI handles empty `choices` arrays.
-- **Steer hook fix** — nudge messages use proper message objects instead of raw dicts.
-- **Skill workshop** — blocks apply on any scanner finding (including malicious-pattern detections).
-- **Sandbox env redaction** — broad secret-name matcher catches `*_TOKEN`, `*_API_KEY`, `*PASSWORD*`, etc.
-
-### Previously In v6.9.0
-
-```bash
-npx tsx src/cli.ts --task "summarize prior runs" --output-format json
-npx tsx src/cli.ts --task "find pytest timeout discussions"  # search_history tool
-```
-
-- **`search_history` tool** — cross-session archive search (SQLite + optional JSONL); raw prior message snippets, not summaries.
-- **`--output-format`** — `text`, `json`, or `stream-json` on `--task` for automation.
-- **PTRL → skill promotion** — recurring lessons (≥3×) create pending `skill_workshop` proposals.
-- **`skill_workshop` tool** — governed skill authoring without writing live `SKILL.md` directly.
-- **Consolidated search stack** — shared `searchSqliteMessages`, `snippetFromContent`, lesson utilities in `trajectory/lessons`.
-
-### Previously In v6.8.1
-
-```bash
-npx tsx src/cli.ts --dry-run --profile ollama --task "inspect this repo"
-```
-
-- **Shared prompt assembly** centralizes system prompt construction, lesson preambles, cache-boundary placement, and dynamic memory/skill injection in `src/prompts`.
-- **Packaged bundled skills** copies `skills/` into `dist/skills` during `npm run build`, so GitHub/npm installs retain runtime skills.
-- **OpenHarness comparison** adds [HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness) as a peer in the feature matrix with conservative full/partial markers.
-- **Dry-run previews** report provider resolution, auth readiness, inspectable tools, likely matching tools, and next actions without calling an LLM or executing tools.
-- **Provider profiles** give stable aliases for common backends while still letting explicit `createClawAgent()` parameters override profile values.
-- **Background task tools** expose long-running command management (`task_create`, `task_status`, `task_output`, `task_stop`, `task_list`) through the normal tool registry.
-- **Plugin compatibility loading** reads `plugin.json` / `.claude-plugin/plugin.json` metadata, skills, commands, hooks, and MCP server declarations without executing plugin code.
-- **MCP auth refresh** lets agents update MCP server auth material and reconnect configured servers deliberately.
 
 ## Installation
 

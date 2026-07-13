@@ -184,6 +184,20 @@ export function permissionDecisionFromDict(
 
 // ── Codec helpers ───────────────────────────────────────────────────
 
+/** Map a clawagents tool name onto the closest ACP `ToolKind`. */
+export function inferToolKind(name: string): string {
+    const n = (name || "").toLowerCase();
+    if (/(^|_)(read|cat|glob|ls|list|tree)($|_)/.test(n)) return "read";
+    if (/(write|edit|patch|apply|create_file)/.test(n)) return "edit";
+    if (/(delete|remove|rm)($|_)/.test(n)) return "delete";
+    if (/(move|rename)/.test(n)) return "move";
+    if (/(grep|search|find)/.test(n)) return "search";
+    if (/(exec|bash|shell|run_command|command)/.test(n)) return "execute";
+    if (/think/.test(n)) return "think";
+    if (/(web|fetch|http|browse)/.test(n)) return "fetch";
+    return "other";
+}
+
 export function encodeUpdate(update: SessionUpdate): Record<string, unknown> {
     switch (update.kind) {
         case "message":
@@ -200,6 +214,11 @@ export function encodeUpdate(update: SessionUpdate): Record<string, unknown> {
             return {
                 sessionUpdate: "tool_call",
                 toolCallId: update.toolCallId,
+                // `title` is REQUIRED by the ACP schema (zod-validated on the
+                // client side); `name`/`label` are kept for local round-trips
+                // and get stripped from the wire by the schema.
+                title: update.label ?? update.name,
+                kind: inferToolKind(update.name),
                 name: update.name,
                 label: update.label ?? update.name,
                 status: "in_progress",
@@ -213,15 +232,24 @@ export function encodeUpdate(update: SessionUpdate): Record<string, unknown> {
                 status,
                 name: update.name,
             };
+            // Spec `ToolCallContent` wraps each ContentBlock as
+            // {type: "content", content: block} — bare text blocks fail the
+            // client-side schema validation.
             const blocks: Record<string, unknown>[] = [];
             if (update.error) {
-                blocks.push({ type: "text", text: String(update.error) });
+                blocks.push({
+                    type: "content",
+                    content: { type: "text", text: String(update.error) },
+                });
             } else if (update.output !== undefined && update.output !== null) {
                 const text =
                     typeof update.output === "string"
                         ? update.output
                         : safeStringify(update.output);
-                blocks.push({ type: "text", text });
+                blocks.push({
+                    type: "content",
+                    content: { type: "text", text },
+                });
             }
             if (blocks.length > 0) {
                 out.content = blocks;
@@ -259,26 +287,36 @@ export function decodeUpdate(
             return {
                 kind: "tool_call_start",
                 toolCallId: String(payload.toolCallId ?? newId("tc")),
-                name: String(payload.name ?? ""),
+                // Wire frames from spec-strict peers carry only `title`.
+                name: String(payload.name ?? payload.title ?? ""),
                 arguments: {
                     ...((payload.rawInput as Record<string, unknown> | undefined) ??
                         {}),
                 },
-                label: payload.label ? String(payload.label) : undefined,
+                label: payload.label
+                    ? String(payload.label)
+                    : payload.title
+                        ? String(payload.title)
+                        : undefined,
             };
         case "tool_call_update": {
             const content = payload.content;
             let textOut: string | undefined;
             if (Array.isArray(content)) {
-                for (const block of content) {
+                for (const raw of content) {
+                    if (!raw || typeof raw !== "object") continue;
+                    let block = raw as Record<string, unknown>;
+                    // Spec shape: {type:"content", content: ContentBlock};
+                    // also accept bare ContentBlocks from older frames.
                     if (
-                        block &&
-                        typeof block === "object" &&
-                        (block as Record<string, unknown>).type === "text"
+                        block.type === "content" &&
+                        block.content &&
+                        typeof block.content === "object"
                     ) {
-                        textOut = String(
-                            (block as Record<string, unknown>).text ?? ""
-                        );
+                        block = block.content as Record<string, unknown>;
+                    }
+                    if (block.type === "text") {
+                        textOut = String(block.text ?? "");
                         break;
                     }
                 }

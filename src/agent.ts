@@ -17,6 +17,7 @@ import { LocalBackend } from "./sandbox/local.js";
 import type { Handoff } from "./handoffs.js";
 import type { RunContext } from "./run-context.js";
 import { appendPromptInjection, buildPromptInjection } from "./prompts/index.js";
+import { getClawagentsHome } from "./paths.js";
 
 // ─── LangChain Tool Adapter ──────────────────────────────────────────────────
 
@@ -599,9 +600,12 @@ export async function createClawAgent({
     // ── Auto-discover skills from default locations ────────────────────
     const baseSkillDirs = skills !== undefined ? toList(skills) : autoDiscoverSkills();
     const bundledSkillsDir = getBundledSkillsDir();
+    // Bundled skills go FIRST: SkillStore gives later directories precedence
+    // on name collisions, so user/workspace skills must override bundled ones
+    // (openclaw/deepagents precedence order), not the other way around.
     const skillDirs =
         bundledSkillsDir && existsSync(bundledSkillsDir)
-            ? [...baseSkillDirs, bundledSkillsDir]
+            ? [bundledSkillsDir, ...baseSkillDirs]
             : baseSkillDirs;
     let skillSummaries: string | null = null;
 
@@ -641,7 +645,9 @@ export async function createClawAgent({
         }
 
         for (const skillTool of createSkillTools(skillStore)) {
-            if (skillTool.name === "use_skill") {
+            // Both tools: the in-prompt catalog points overflow to
+            // list_skills, and use_skill loads one full body on demand.
+            if (skillTool.name === "use_skill" || skillTool.name === "list_skills") {
                 registry.register(skillTool);
             }
         }
@@ -748,7 +754,10 @@ async function resolveModel(
         const lower = activeModel.toLowerCase();
         if (lower.startsWith("gemini")) {
             config.geminiApiKey = apiKey;
-        } else if (lower.startsWith("claude") || lower.startsWith("anthropic")) {
+        } else if (
+            (lower.startsWith("claude") || lower.startsWith("anthropic")) &&
+            !config.openaiBaseUrl
+        ) {
             config.anthropicApiKey = apiKey;
         } else {
             config.openaiApiKey = apiKey;
@@ -793,6 +802,21 @@ function autoDiscoverMemory(): string[] {
 function autoDiscoverSkills(): string[] {
     const cwd = process.cwd();
     const found: string[] = [];
+    // Lowest-precedence first (SkillStore gives later dirs precedence):
+    // personal skill homes, then workspace dirs. Homes are opt-in via
+    // CLAW_USER_SKILL_HOMES=1 so library consumers and tests stay hermetic.
+    if ((process.env["CLAW_USER_SKILL_HOMES"] ?? "").trim() === "1") {
+        const home = process.env["HOME"] ?? process.env["USERPROFILE"] ?? "";
+        const candidates = [
+            resolve(getClawagentsHome(), "skills"),
+            ...(home ? [resolve(home, ".agents/skills")] : []),
+        ];
+        for (const p of candidates) {
+            try {
+                if (existsSync(p) && statSync(p).isDirectory()) found.push(p);
+            } catch { /* ignore */ }
+        }
+    }
     for (const name of DEFAULT_SKILL_DIRS) {
         const p = resolve(cwd, name);
         if (existsSync(p)) {

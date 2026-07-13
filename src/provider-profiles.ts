@@ -25,6 +25,12 @@ export const BUILTIN_PROVIDER_PROFILES: Record<string, ProviderProfile> = {
     gemini: { name: "gemini", provider: "gemini", model: "gemini-3-flash-preview" },
     anthropic: { name: "anthropic", provider: "anthropic", model: "claude-sonnet-4-5" },
     ollama: { name: "ollama", provider: "openai", model: "llama3.1", baseUrl: "http://localhost:11434/v1", apiKey: "ollama" },
+    bedrock: {
+        name: "bedrock",
+        provider: "openai",
+        model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        apiKey: "bedrock",
+    },
 };
 
 function profilePaths(): string[] {

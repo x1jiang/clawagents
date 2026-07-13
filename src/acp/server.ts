@@ -220,8 +220,14 @@ export class AcpServer {
         let acp: unknown;
         try {
             acp = _localRequire("@zed-industries/agent-client-protocol");
-        } catch (exc) {
-            throw new MissingAcpDependencyError(exc);
+        } catch {
+            // The package is ESM; require(esm) needs Node ≥20.19/22.12.
+            // Fall back to a dynamic import before declaring it missing.
+            try {
+                acp = await import("@zed-industries/agent-client-protocol");
+            } catch (exc) {
+                throw new MissingAcpDependencyError(exc);
+            }
         }
         await this.serveAsync(acp);
     }
@@ -240,39 +246,53 @@ export class AcpServer {
     }
 
     private async serveAsync(acp: unknown): Promise<void> {
-        // The official package surface evolves quickly; we only rely
-        // on the small subset documented as stable. Any divergence
-        // surfaces here as MissingAcpDependencyError so users get a
-        // clear install/upgrade hint rather than a TypeError.
+        // agent-client-protocol ≥0.4: `ndJsonStream(output, input)` builds
+        // the framed Stream and `AgentSideConnection(toAgent, stream)` binds
+        // it. Older/newer surface drift shows up here as
+        // MissingAcpDependencyError with an upgrade hint, not a TypeError.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const a = acp as any;
         if (
             !a ||
-            typeof a.stdioStreams !== "function" ||
+            typeof a.ndJsonStream !== "function" ||
             typeof a.AgentSideConnection !== "function"
         ) {
             throw new MissingAcpDependencyError(
-                "agent-client-protocol package is missing expected exports"
+                "agent-client-protocol package is missing expected exports " +
+                    "(need ndJsonStream + AgentSideConnection; install " +
+                    "@zed-industries/agent-client-protocol@^0.4)"
             );
         }
 
-        const { input, output } = await a.stdioStreams();
-        const ClawAcpAgent = this.makeAgentClass(a);
-        const conn = new a.AgentSideConnection(
+        const { Readable, Writable } = await import("node:stream");
+        const stream = a.ndJsonStream(
+            Writable.toWeb(process.stdout) as WritableStream<Uint8Array>,
+            Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>
+        );
+        this.serveConnection(a, stream);
+
+        // The connection pumps stream.readable internally and exposes no
+        // completion signal — the editor owns the process lifetime (it
+        // closes stdio / kills the child when done), so block forever.
+        await new Promise<void>(() => {
+            /* SIGINT / editor exit terminates the process */
+        });
+    }
+
+    /**
+     * Bind the ACP agent to an arbitrary `Stream` (`{writable, readable}`),
+     * returning the live `AgentSideConnection`.
+     *
+     * `serve()` uses this over stdio; tests drive it over in-memory pipes.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    serveConnection(acp: any, stream: unknown): any {
+        const ClawAcpAgent = this.makeAgentClass(acp);
+        return new acp.AgentSideConnection(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (c: any) => new ClawAcpAgent(c, this),
-            input,
-            output
+            stream
         );
-
-        if (typeof conn.waitClosed === "function") {
-            await conn.waitClosed();
-        } else {
-            await new Promise<void>(() => {
-                // No clean shutdown signal — block forever; the user
-                // will SIGINT to stop the server.
-            });
-        }
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -292,9 +312,15 @@ export class AcpServer {
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             async initialize(params: any): Promise<unknown> {
+                // Negotiate down to the lower of ours vs the client's.
+                const ours = Number(acp.PROTOCOL_VERSION ?? 1);
+                const theirs = Number(params?.protocolVersion ?? ours);
                 return {
+                    protocolVersion: Math.min(
+                        Number.isFinite(theirs) ? theirs : ours,
+                        ours
+                    ),
                     agentCapabilities: { loadSession: false },
-                    protocolVersion: params?.protocolVersion ?? 1,
                 };
             }
 
@@ -303,6 +329,12 @@ export class AcpServer {
                 return {
                     sessionId: `sess_${crypto.randomBytes(6).toString("hex")}`,
                 };
+            }
+
+            async authenticate(): Promise<void> {
+                // No auth methods are advertised, so this is never reached
+                // by conforming clients; answer instead of erroring anyway.
+                return;
             }
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -314,15 +346,27 @@ export class AcpServer {
                 const sink: SessionEventSink = async (
                     raw: Record<string, unknown>
                 ) => {
-                    await this.conn.sessionUpdate(req.sessionId, raw);
+                    // ≥0.4 signature: one SessionNotification object.
+                    await this.conn.sessionUpdate({
+                        sessionId: req.sessionId,
+                        update: raw,
+                    });
                 };
 
                 const stop = await serverSelf.runPrompt(req, sink);
+                if (stop === StopReasonValues.ERROR) {
+                    // "error" is not a spec StopReason — surface run failures
+                    // as a JSON-RPC error response instead of an invalid enum.
+                    throw new Error("agent run failed (see error session update)");
+                }
                 return { stopReason: stop };
             }
 
-            async cancel(): Promise<unknown> {
-                return null;
+            async cancel(): Promise<void> {
+                // Prompt cancellation is not implemented for the bridged
+                // agent loop yet; accept the notification so conforming
+                // clients don't error, and let the turn run to completion.
+                return;
             }
         }
 

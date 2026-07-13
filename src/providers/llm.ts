@@ -1201,6 +1201,13 @@ export async function createProvider(modelName: string, config: EngineConfig): P
         return new GeminiProvider(config, GenAI);
     }
     if (lower.startsWith("claude") || lower.startsWith("anthropic")) {
+        // Bedrock Access Gateway / LiteLLM: OpenAI-compatible base URL wins over
+        // Anthropic name-based routing (model IDs look like anthropic.claude-…).
+        if (config.openaiBaseUrl) {
+            if (!config.openaiApiKey) config.openaiApiKey = "bedrock";
+            config.openaiModel = modelName;
+            return new OpenAIProvider(config);
+        }
         const AnthropicClass = await getAnthropicClass();
         if (!AnthropicClass) {
             throw new Error("@anthropic-ai/sdk not installed. Install with: npm install @anthropic-ai/sdk");

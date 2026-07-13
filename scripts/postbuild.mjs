@@ -5,7 +5,7 @@
  *   - Make dist/cli.js executable (chmod +x).
  *   - Copy bundled skills into dist/ so npm packages include runtime skills.
  */
-import { readFileSync, writeFileSync, chmodSync, existsSync, cpSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, existsSync, cpSync, rmSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,7 +30,13 @@ chmodSync(cliPath, 0o755);
 console.log("[postbuild] chmod +x dist/cli.js");
 
 if (existsSync(skillsSrc)) {
-    rmSync(skillsDest, { recursive: true, force: true });
+    // dist/skills also holds tsc output compiled from src/skills/ (e.g.
+    // skills/workshop/service.js, imported by dist/tools/skill-workshop.js).
+    // Only refresh the bundled asset packs; wiping the whole directory would
+    // delete that compiled code and break runtime imports.
+    for (const entry of readdirSync(skillsSrc)) {
+        rmSync(resolve(skillsDest, entry), { recursive: true, force: true });
+    }
     cpSync(skillsSrc, skillsDest, { recursive: true });
-    console.log("[postbuild] copied skills to dist/skills");
+    console.log("[postbuild] merged bundled skills into dist/skills");
 }
