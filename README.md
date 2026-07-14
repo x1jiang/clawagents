@@ -1,22 +1,29 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. TypeScript sibling of [`clawagents` on PyPI](https://pypi.org/project/clawagents/). **v6.12.11**
+A lean, full-stack agentic protocol. TypeScript sibling of [`clawagents` on PyPI](https://pypi.org/project/clawagents/). **v6.12.12**
 
-> **v6.12.11 (July 2026)** — Skill loader + ACP parity with Python 6.12.10/6.12.11: `disable-model-invocation`, safer requires parsing, resource disclosure, and ACP `tool_call` schema fixes. See [Changelog](#changelog).
+> **v6.12.12 (July 2026)** — User-message image parity + ACP suite hang fix. See [Changelog](#changelog).
 
-### Companion: Python v6.12.11 (PyPI)
+### Companion: Python v6.12.12 (PyPI)
 
 ```bash
-pip install -U 'clawagents>=6.12.11'
+pip install -U 'clawagents>=6.12.12'
 ```
 
 Highlights from the matching Python line (also reflected in this TS cut where applicable):
 
+- **`invoke(images=…)` / `invoke(files=…)`** on Python — vision images + PDF/DOCX attachments
 - Skill progressive disclosure with per-turn ranking, dynamic catalog budget, `list_skills` / `use_skill`
 - `disable-model-invocation` for user-only skills
 - Host-friendly dotenv (`CLAWAGENTS_SKIP_DOTENV` / no host-key clobber)
 - Responses / `wire_api` / `ssl_verify` / `reasoning_effort` for GPT-5.x and custom gateways
-- Native AWS Bedrock + VS Code extension **1.0.30**
+- Native AWS Bedrock + VS Code extension **1.0.31**
+
+### New In v6.12.12
+
+- **Images** — OpenAI-style `image_url` user-message parts convert to Anthropic `image` blocks (parity with Python vision path).
+- **ACP** — `assertAcpModule()` extracted so the dependency-guard test no longer starts a stdio server (fixes suite hang).
+- **Version + docs** aligned with Python **6.12.12** and VS Code **1.0.31**.
 
 ### New In v6.12.11
 
