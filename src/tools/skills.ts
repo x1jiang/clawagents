@@ -334,6 +334,89 @@ export function isSkillEligible(skill: Skill): boolean {
     return skillIneligibilityReason(skill) === null;
 }
 
+// ─── Load-time content inspection (supply-chain hardening) ──────────────────
+// Auto-discovered skills reach the model prompt with no human in the loop, so
+// a SKILL.md planted in a scanned directory can smuggle instructions the
+// operator never sees. Two documented vectors: invisible-Unicode smuggling
+// (Unicode Tags block, bidi overrides — "Rules File Backdoor" / Trojan
+// Source) and remote-exec one-liners in the body (ClawHub / VirusTotal).
+// Defense-in-depth ONLY — scanners are evadable, never a trust decision. On a
+// high-signal hit the skill is quarantined (kept for diagnostics, kept out of
+// the catalog, refused by use_skill) rather than deleted.
+
+// Unicode Tags block — invisible chars models still read; ~zero legit use.
+const TAG_CHARS_RE = /[\u{E0000}-\u{E007F}]/u;
+// Bidirectional overrides / isolates (Trojan Source).
+const BIDI_OVERRIDE_RE = /[‪-‮⁦-⁩]/;
+// Zero-width / soft-hyphen / BOM — stripped as hygiene + warned, not blocked.
+const ZERO_WIDTH_RE = /[​-‍⁠﻿­]/g;
+// C0/C1 control chars except tab/newline/carriage-return.
+// eslint-disable-next-line no-control-regex
+const CONTROL_RE = /[ --]/g;
+
+// High-signal remote-execution signatures — precision-tuned. Lower-signal
+// mentions (bare `rm -rf` / `subprocess.` / `eval(`) are intentionally absent;
+// they occur in legitimate skill instructions and belong to the stricter
+// authoring-time gate (skill-workshop scanner), not the load gate.
+const DANGEROUS_LOAD_PATTERNS: Array<[RegExp, string]> = [
+    [
+        /\b(?:curl|wget|fetch)\b[^\n|]{0,400}\|\s*(?:sudo\s+)?(?:ba|z|k|a)?sh\b/i,
+        "pipes a network download straight into a shell",
+    ],
+    [
+        /\b(?:iex|invoke-expression)\s*[("']/i,
+        "PowerShell Invoke-Expression of dynamic content",
+    ],
+    [/new-object\s+net\.webclient/i, "PowerShell remote download via Net.WebClient"],
+    [
+        /base64\s+(?:-d|--decode|-D)\b[^\n]{0,200}\|\s*(?:ba)?sh/i,
+        "base64-decodes content and pipes it to a shell",
+    ],
+    [
+        /\|\s*base64\s+(?:-d|--decode|-D)\b[^\n]{0,80}\|\s*(?:python|node|perl|ruby)/i,
+        "base64-decodes content and pipes it to an interpreter",
+    ],
+];
+
+/** Remove zero-width / soft-hyphen / BOM / control chars (tab/newline/CR
+ *  preserved). Returns [cleaned, removedCount]. */
+export function stripInvisible(text: string): [string, number] {
+    if (!text) return [text, 0];
+    const removed =
+        (text.match(ZERO_WIDTH_RE)?.length ?? 0) + (text.match(CONTROL_RE)?.length ?? 0);
+    const cleaned = removed ? text.replace(ZERO_WIDTH_RE, "").replace(CONTROL_RE, "") : text;
+    return [cleaned, removed];
+}
+
+/** High-signal findings that quarantine a skill at load time (covers the
+ *  always-injected name+description and the body). Empty = passed. */
+export function scanSkillContent(name: string, description: string, body: string): string[] {
+    const findings: string[] = [];
+    for (const [label, text] of [
+        ["name", name],
+        ["description", description],
+        ["body", body],
+    ] as const) {
+        if (TAG_CHARS_RE.test(text || "")) {
+            findings.push(`invisible Unicode Tag characters in ${label}`);
+        }
+        if (BIDI_OVERRIDE_RE.test(text || "")) {
+            findings.push(`bidirectional-override characters in ${label}`);
+        }
+    }
+    for (const [pattern, why] of DANGEROUS_LOAD_PATTERNS) {
+        if (pattern.test(body || "")) findings.push(why);
+    }
+    return [...new Set(findings)];
+}
+
+/** Load-time quarantine is on unless CLAW_SKILL_SCAN=off (invisible-char
+ *  stripping still runs regardless — pure hygiene). */
+function skillScanEnabled(): boolean {
+    const v = (process.env["CLAW_SKILL_SCAN"] ?? "").trim().toLowerCase();
+    return v !== "off" && v !== "0" && v !== "false" && v !== "no";
+}
+
 // ─── Skill Store ───────────────────────────────────────────────────────────
 
 /**
@@ -349,6 +432,9 @@ export class SkillStore {
     private seenDirs = new Set<string>();
     /** name → reason for skills whose runtime requirements failed. */
     readonly ineligible = new Map<string, string>();
+    /** name → reason for skills that failed the load-time content scan
+     *  (invisible-Unicode / remote-exec). Kept out of the model catalog. */
+    readonly quarantined = new Map<string, string>();
     /** Human-readable loader diagnostics (spec violations, skipped files). */
     readonly warnings: string[] = [];
 
@@ -382,17 +468,57 @@ export class SkillStore {
             this.warnings.push(`${skillFile}: skipped (empty skill name)`);
             return;
         }
+
+        // ── Trust boundary: inspect content before it can reach the prompt ──
+        // Scan the RAW text first (so smuggled chars can't hide from the
+        // scanner behind the same chars we then strip), then sanitize
+        // everything that gets injected.
+        const findings = scanSkillContent(skill.name, skill.description, skill.content);
+        const [cleanName, nName] = stripInvisible(skill.name);
+        const [cleanDesc, nDesc] = stripInvisible(skill.description);
+        const [cleanBody, nBody] = stripInvisible(skill.content);
+        skill.name = cleanName;
+        skill.description = cleanDesc;
+        skill.content = cleanBody;
+        if (!skill.name.trim()) {
+            this.warnings.push(`${skillFile}: skipped (skill name empty after sanitize)`);
+            return;
+        }
+        if (nName + nDesc + nBody > 0) {
+            this.warnings.push(
+                `${skillFile}: stripped ${nName + nDesc + nBody} invisible/control char(s) from skill text`,
+            );
+        }
+
         for (const w of skill.warnings ?? []) {
             this.warnings.push(`${skillFile}: ${w}`);
         }
+
+        if (findings.length > 0 && skillScanEnabled()) {
+            const reason = findings.join("; ");
+            this.quarantined.set(skill.name, reason);
+            this.warnings.push(
+                `${skillFile}: QUARANTINED (content scan) — ${reason}. ` +
+                    `Set CLAW_SKILL_SCAN=off to load anyway after review.`,
+            );
+            this.skills.delete(skill.name);
+            return;
+        }
+        if (findings.length > 0) {
+            this.warnings.push(
+                `${skillFile}: content-scan findings ignored (CLAW_SKILL_SCAN=off) — ${findings.join("; ")}`,
+            );
+        }
+
         const reason = skillIneligibilityReason(skill);
         if (reason !== null) {
             this.ineligible.set(skill.name, reason);
             return;
         }
         this.skills.set(skill.name, skill);
-        // An eligible load supersedes a stale ineligible record for the name.
+        // A clean load supersedes stale ineligible/quarantine records.
         this.ineligible.delete(skill.name);
+        this.quarantined.delete(skill.name);
     }
 
     async loadAll(): Promise<void> {
@@ -543,7 +669,7 @@ export function createSkillTools(store: SkillStore): Tool[] {
         parameters: {},
         async execute(): Promise<ToolResult> {
             const skills = store.list();
-            if (skills.length === 0 && store.ineligible.size === 0) {
+            if (skills.length === 0 && store.ineligible.size === 0 && store.quarantined.size === 0) {
                 return { success: true, output: "No skills available." };
             }
             const lines = skills.map((s) => {
@@ -560,6 +686,13 @@ export function createSkillTools(store: SkillStore): Tool[] {
                     .map(([name, reason]) => `- **${name}**: ${reason}`)
                     .join("\n");
                 output += `\n\nUnavailable (requirements not met):\n${unavailable}`;
+            }
+            if (store.quarantined.size > 0) {
+                const blocked = [...store.quarantined.entries()]
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([name, reason]) => `- **${name}**: ${reason}`)
+                    .join("\n");
+                output += `\n\nQuarantined (failed security content scan — not loaded):\n${blocked}`;
             }
             return { success: true, output };
         },
@@ -590,10 +723,18 @@ export function createSkillTools(store: SkillStore): Tool[] {
                 const suggestions = suggestSkills(store, name, 5);
                 const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
                 let ineligibleNote = "";
-                for (const [iname, reason] of store.ineligible) {
-                    if (normSkillKey(iname) === normSkillKey(name)) {
-                        ineligibleNote = ` Skill "${iname}" exists but is unavailable: ${reason}.`;
+                for (const [qname, reason] of store.quarantined) {
+                    if (normSkillKey(qname) === normSkillKey(name)) {
+                        ineligibleNote = ` Skill "${qname}" was QUARANTINED by the content scanner and cannot be loaded: ${reason}.`;
                         break;
+                    }
+                }
+                if (!ineligibleNote) {
+                    for (const [iname, reason] of store.ineligible) {
+                        if (normSkillKey(iname) === normSkillKey(name)) {
+                            ineligibleNote = ` Skill "${iname}" exists but is unavailable: ${reason}.`;
+                            break;
+                        }
                     }
                 }
                 return {

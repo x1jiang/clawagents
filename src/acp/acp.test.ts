@@ -108,7 +108,10 @@ test("tool_call_complete encodes text output", () => {
     });
     assert.equal(encoded.status, "completed");
     const blocks = encoded.content as Array<Record<string, unknown>>;
-    assert.deepEqual(blocks[0], { type: "text", text: "contents" });
+    assert.deepEqual(blocks[0], {
+        type: "content",
+        content: { type: "text", text: "contents" },
+    });
 });
 
 test("tool_call_complete encodes JSON output", () => {
@@ -119,7 +122,8 @@ test("tool_call_complete encodes JSON output", () => {
         output: { hits: [1, 2, 3] },
     });
     const blocks = encoded.content as Array<Record<string, unknown>>;
-    assert.deepEqual(JSON.parse(String(blocks[0].text)), { hits: [1, 2, 3] });
+    const inner = blocks[0].content as Record<string, unknown>;
+    assert.deepEqual(JSON.parse(String(inner.text)), { hits: [1, 2, 3] });
 });
 
 test("tool_call_complete error round-trip", () => {
@@ -228,18 +232,12 @@ test("Session pairs concurrent tool calls in order", () => {
     const ends = sink.filter((u) => u.sessionUpdate === "tool_call_update");
     assert.equal(starts[0].toolCallId, ends[0].toolCallId);
     assert.equal(starts[1].toolCallId, ends[1].toolCallId);
-    const firstText = (
-        (ends[0].content as Array<Record<string, unknown>>)[0] as Record<
-            string,
-            unknown
-        >
-    ).text;
-    const secondText = (
-        (ends[1].content as Array<Record<string, unknown>>)[0] as Record<
-            string,
-            unknown
-        >
-    ).text;
+    const unwrap = (u: Record<string, unknown>): unknown => {
+        const block = (u.content as Array<Record<string, unknown>>)[0];
+        return (block.content as Record<string, unknown>).text;
+    };
+    const firstText = unwrap(ends[0]);
+    const secondText = unwrap(ends[1]);
     assert.equal(firstText, "first");
     assert.equal(secondText, "second");
 });
