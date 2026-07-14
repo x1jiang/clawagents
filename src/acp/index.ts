@@ -41,4 +41,4 @@ export type {
 } from "./session.js";
 export { AgentSession } from "./session.js";
 export type { AcpServerOptions, AgentLike, PromptRunner } from "./server.js";
-export { ACP_AVAILABLE, AcpServer, defaultRunner, serve } from "./server.js";
+export { ACP_AVAILABLE, AcpServer, assertAcpModule, defaultRunner, serve } from "./server.js";

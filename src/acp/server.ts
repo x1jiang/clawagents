@@ -51,6 +51,28 @@ function probeAcp(): boolean {
 /** Whether the optional `agent-client-protocol` package is importable. */
 export const ACP_AVAILABLE: boolean = probeAcp();
 
+/**
+ * Validate that a loaded `agent-client-protocol` module exposes the surface
+ * we bind against (≥0.4: `ndJsonStream` + `AgentSideConnection`). Throws
+ * {@link MissingAcpDependencyError} on drift so users get an upgrade hint
+ * rather than an opaque `TypeError`. Exported so it can be unit-tested
+ * without starting a (blocking) stdio server.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function assertAcpModule(a: any): void {
+    if (
+        !a ||
+        typeof a.ndJsonStream !== "function" ||
+        typeof a.AgentSideConnection !== "function"
+    ) {
+        throw new MissingAcpDependencyError(
+            "agent-client-protocol package is missing expected exports " +
+                "(need ndJsonStream + AgentSideConnection; install " +
+                "@zed-industries/agent-client-protocol@^0.4)"
+        );
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Default agent runner — wires PromptRequest into agent.run()
 // ──────────────────────────────────────────────────────────────────────
@@ -252,17 +274,7 @@ export class AcpServer {
         // MissingAcpDependencyError with an upgrade hint, not a TypeError.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const a = acp as any;
-        if (
-            !a ||
-            typeof a.ndJsonStream !== "function" ||
-            typeof a.AgentSideConnection !== "function"
-        ) {
-            throw new MissingAcpDependencyError(
-                "agent-client-protocol package is missing expected exports " +
-                    "(need ndJsonStream + AgentSideConnection; install " +
-                    "@zed-industries/agent-client-protocol@^0.4)"
-            );
-        }
+        assertAcpModule(a);
 
         const { Readable, Writable } = await import("node:stream");
         const stream = a.ndJsonStream(

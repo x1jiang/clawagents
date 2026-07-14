@@ -28,6 +28,7 @@ import {
     toolCallStart,
     AcpError,
     MissingAcpDependencyError,
+    assertAcpModule,
 } from "./index.js";
 
 // ──────────────────────────────────────────────────────────────────────
@@ -424,11 +425,21 @@ test("Server runPrompt reports runner error", async () => {
     assert.equal(stop, StopReasonValues.ERROR);
 });
 
-test("Server.serve throws MissingAcpDependencyError when package absent", async () => {
-    // The optional package is not installed in our dev tree; .serve() must
-    // produce a typed error rather than an opaque module-resolution failure.
-    const server = new AcpServer({ agent: new FakeAgent() });
-    await assert.rejects(server.serve(), MissingAcpDependencyError);
+test("assertAcpModule throws MissingAcpDependencyError on missing exports", () => {
+    // The dependency guard `serve()` runs before binding stdio. We test it
+    // directly (not via `serve()`, which — with the package present — would
+    // start a real, never-returning stdio server and hang the suite).
+    assert.throws(() => assertAcpModule(null), MissingAcpDependencyError);
+    assert.throws(() => assertAcpModule({}), MissingAcpDependencyError);
+    // Present but incomplete surface (missing AgentSideConnection) still throws.
+    assert.throws(
+        () => assertAcpModule({ ndJsonStream: () => ({}) }),
+        MissingAcpDependencyError,
+    );
+    // A conforming module passes the guard.
+    assert.doesNotThrow(() =>
+        assertAcpModule({ ndJsonStream: () => ({}), AgentSideConnection: class {} }),
+    );
 });
 
 test("AcpError hierarchy is well-formed", () => {
