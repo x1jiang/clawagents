@@ -1,23 +1,28 @@
 # ClawAgents (TypeScript)
 
-A lean, full-stack agentic protocol. TypeScript sibling of [`clawagents` on PyPI](https://pypi.org/project/clawagents/). **v6.12.12**
+A lean, full-stack agentic protocol. TypeScript sibling of [`clawagents` on PyPI](https://pypi.org/project/clawagents/). **v6.12.13**
 
-> **v6.12.12 (July 2026)** — User-message image parity + ACP suite hang fix. See [Changelog](#changelog).
+> **v6.12.13 (July 2026)** — Companion release aligned with Python skill-quality hardening. See [Changelog](#changelog).
 
-### Companion: Python v6.12.12 (PyPI)
+### Companion: Python v6.12.13 (PyPI)
 
 ```bash
-pip install -U 'clawagents>=6.12.12'
+pip install -U 'clawagents>=6.12.13'
 ```
 
 Highlights from the matching Python line (also reflected in this TS cut where applicable):
 
+- **Skill use complete / relevant / contained** — high-recall retrieval, paged `use_skill`, intersecting `allowed-tools`
 - **`invoke(images=…)` / `invoke(files=…)`** on Python — vision images + PDF/DOCX attachments
 - Skill progressive disclosure with per-turn ranking, dynamic catalog budget, `list_skills` / `use_skill`
 - `disable-model-invocation` for user-only skills
 - Host-friendly dotenv (`CLAWAGENTS_SKIP_DOTENV` / no host-key clobber)
 - Responses / `wire_api` / `ssl_verify` / `reasoning_effort` for GPT-5.x and custom gateways
-- Native AWS Bedrock + VS Code extension **1.0.31**
+- Native AWS Bedrock + VS Code extension **1.0.32**
+
+### New In v6.12.13
+
+- **Version + docs** aligned with Python **6.12.13** and VS Code **1.0.32**.
 
 ### New In v6.12.12
 
