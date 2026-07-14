@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { EngineConfig } from "../config/config.js";
+import { imageUrlToAnthropicBlock } from "../media/images.js";
 
 // Gemini is optional — lazy import
 let _GoogleGenAI: typeof import("@google/genai").GoogleGenAI | null = null;
@@ -882,6 +883,32 @@ async function getAnthropicClass() {
     return _AnthropicClass;
 }
 
+/**
+ * Shape a user/assistant message's content for Anthropic's Messages API.
+ *
+ * Anthropic has no `image_url` content type — convert the canonical
+ * OpenAI-style image blocks (used for user-message images) into
+ * `image`/`source` blocks. Without this an attached image reaches Claude as an
+ * invalid block and the request 400s. Non-list content and non-image blocks
+ * pass through unchanged; malformed image_url parts are dropped.
+ */
+function anthropicMessageContent(content: unknown): unknown {
+    if (!Array.isArray(content)) return content;
+    if (!content.some((p) => p && typeof p === "object" && (p as Record<string, unknown>)["type"] === "image_url")) {
+        return content;
+    }
+    const converted: unknown[] = [];
+    for (const part of content) {
+        if (part && typeof part === "object" && (part as Record<string, unknown>)["type"] === "image_url") {
+            const block = imageUrlToAnthropicBlock(part as Record<string, unknown>);
+            if (block !== null) converted.push(block);
+        } else {
+            converted.push(part);
+        }
+    }
+    return converted;
+}
+
 export class AnthropicProvider implements LLMProvider {
     name = "anthropic";
     private client: any;
@@ -934,7 +961,7 @@ export class AnthropicProvider implements LLMProvider {
             } else {
                 apiMessages.push({
                     role: m.role === "assistant" ? "assistant" : "user",
-                    content: m.content,
+                    content: anthropicMessageContent(m.content),
                 });
             }
         }

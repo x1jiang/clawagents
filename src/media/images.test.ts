@@ -12,6 +12,7 @@ import {
     sanitizeImageBlock,
     sanitizeToolOutput,
     isSharpAvailable,
+    imageUrlToAnthropicBlock,
     _resetSharpCache,
 } from "./images.js";
 
@@ -174,5 +175,34 @@ describe("sanitizeToolOutput — walks list", () => {
         assert.equal(out[0].type, "text");
         assert.equal(out[1].type, "image");
         assert.equal(out[2].type, "text");
+    });
+});
+
+describe("imageUrlToAnthropicBlock (user-message image parity)", () => {
+    it("converts a data-URL image_url to a base64 image block", () => {
+        const out = imageUrlToAnthropicBlock({
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${TINY_PNG_B64}` },
+        });
+        assert.deepEqual(out, {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: TINY_PNG_B64 },
+        });
+    });
+
+    it("maps an http(s) image_url to a url source", () => {
+        const out = imageUrlToAnthropicBlock({
+            type: "image_url",
+            image_url: { url: "https://example.com/x.png" },
+        });
+        assert.deepEqual(out, {
+            type: "image",
+            source: { type: "url", url: "https://example.com/x.png" },
+        });
+    });
+
+    it("returns null for non-image and malformed blocks", () => {
+        assert.equal(imageUrlToAnthropicBlock({ type: "text", text: "hi" }), null);
+        assert.equal(imageUrlToAnthropicBlock({ type: "image_url", image_url: {} }), null);
     });
 });

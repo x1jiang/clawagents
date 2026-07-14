@@ -290,3 +290,32 @@ export async function sanitizeToolOutput(
     }
     return out;
 }
+
+/**
+ * Convert an OpenAI-style `image_url` content block to an Anthropic `image`
+ * block. Returns `null` if the part isn't a usable image_url.
+ *
+ * Anthropic's Messages API has no `image_url` type; it requires
+ * `{type:"image",source:{type:"base64",media_type,data}}` (or a `url` source).
+ * The OpenAI/Gemini providers accept `image_url` natively, so it is the
+ * canonical internal shape for user-message images — this bridges Anthropic.
+ */
+export function imageUrlToAnthropicBlock(
+    part: Record<string, unknown>,
+): Record<string, unknown> | null {
+    if (!part || typeof part !== "object" || part["type"] !== "image_url") return null;
+    const url = ((part["image_url"] as Record<string, unknown> | undefined)?.["url"]) ?? "";
+    if (typeof url !== "string" || !url) return null;
+    if (url.startsWith("data:") && url.includes(";base64,")) {
+        const [header, b64] = url.slice(5).split(";base64,", 2);
+        const mediaType = (header.split(";", 1)[0] || "image/png").trim();
+        return {
+            type: "image",
+            source: { type: "base64", media_type: mediaType, data: b64 },
+        };
+    }
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+        return { type: "image", source: { type: "url", url } };
+    }
+    return null;
+}
