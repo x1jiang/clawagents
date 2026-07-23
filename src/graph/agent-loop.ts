@@ -25,6 +25,7 @@ import { stripThinkingTokens } from "../providers/llm.js";
 import type { ToolRegistry, ParsedToolCall, ToolResult } from "../tools/registry.js";
 import { writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { setOverrides } from "../config/features.js";
 import { redactObj } from "../redact.js";
 import { RunContext, type ApprovalRecord } from "../run-context.js";
@@ -225,6 +226,11 @@ const MODEL_PROFILES: Record<string, ModelProfile> = {
     "o1-mini": { maxInputTokens: 128_000, budgetRatio: 0.80 },
     "o1": { maxInputTokens: 200_000, budgetRatio: 0.80 },
     // ── Google — Gemini 3.x (1M–2M context) ────────────────────────────
+    "gemini-3.6-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3.6": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3.5-flash-lite": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3.5-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
+    "gemini-3.5": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
     "gemini-3.1-pro": { maxInputTokens: 2_000_000, budgetRatio: 0.90 },
     "gemini-3.1-flash": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
     "gemini-3.1": { maxInputTokens: 1_000_000, budgetRatio: 0.90 },
@@ -435,6 +441,39 @@ function estimateTokens(text: string | any[], multiplier: number, model?: string
 
 function estimateMessagesTokens(messages: LLMMessage[], multiplier: number, model?: string): number {
     return countMessagesTokens(messages, model, multiplier);
+}
+
+type MessageTokenEstimator = (messages: LLMMessage[]) => number;
+
+/**
+ * Keeps an exact provider-reported prompt-token checkpoint and estimates only
+ * messages appended since that checkpoint. Transcript rewrites deliberately
+ * fall back to one full recount and establish a new checkpoint.
+ */
+export class IncrementalTokenLedger {
+    private checkpoint: LLMMessage[] = [];
+    private checkpointTokens = 0;
+
+    constructor(private readonly estimateMessages: MessageTokenEstimator) {}
+
+    rebase(messages: LLMMessage[], exactTokens?: number): number {
+        this.checkpoint = [...messages];
+        this.checkpointTokens = exactTokens ?? this.estimateMessages(messages);
+        return this.checkpointTokens;
+    }
+
+    recordProviderUsage(messages: LLMMessage[], inputTokens: number): number {
+        return this.rebase(messages, inputTokens > 0 ? inputTokens : undefined);
+    }
+
+    estimate(messages: LLMMessage[]): number {
+        const hasCheckpointPrefix =
+            this.checkpoint.length <= messages.length &&
+            this.checkpoint.every((message, index) => messages[index] === message);
+        if (!hasCheckpointPrefix) return this.rebase(messages);
+        if (messages.length === this.checkpoint.length) return this.checkpointTokens;
+        return this.checkpointTokens + this.estimateMessages(messages.slice(this.checkpoint.length));
+    }
 }
 
 // ─── Tool Argument Truncation in Old Messages (learned from deepagents) ───
@@ -676,7 +715,7 @@ function preflightContextCheck(
     registry: ToolRegistry | undefined,
     emit: OnEvent,
     modelName?: string,
-): { messages: LLMMessage[]; toolDesc: string; nativeSchemas: NativeToolSchema[] | undefined } {
+): { messages: LLMMessage[]; toolDesc: string; nativeSchemas: NativeToolSchema[] | undefined; estimatedTokens: number } {
     const resolved = modelName
         ? resolveContextBudget(modelName, contextWindow)
         : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
@@ -692,8 +731,9 @@ function preflightContextCheck(
 
     const payloadTokens = () => estimateMessagesTokens(messages, 1.0) + nativeSchemaTokens;
 
-    if (payloadTokens() <= budget) {
-        return { messages, toolDesc, nativeSchemas };
+    let currentTokens = payloadTokens();
+    if (currentTokens <= budget) {
+        return { messages, toolDesc, nativeSchemas, estimatedTokens: currentTokens };
     }
 
     emit("context", {
@@ -723,7 +763,8 @@ function preflightContextCheck(
         emit("context", { message: `tier-1: shortened tool descriptions -> ~${payloadTokens()} tokens` });
     }
 
-    if (payloadTokens() <= budget) return { messages, toolDesc, nativeSchemas };
+    currentTokens = payloadTokens();
+    if (currentTokens <= budget) return { messages, toolDesc, nativeSchemas, estimatedTokens: currentTokens };
 
     // Tier 2: Drop text tool descriptions if native schemas exist
     if (toolDesc && nativeSchemas) {
@@ -736,7 +777,8 @@ function preflightContextCheck(
         emit("context", { message: `tier-2: removed text tool descriptions -> ~${payloadTokens()} tokens` });
     }
 
-    if (payloadTokens() <= budget) return { messages, toolDesc, nativeSchemas };
+    currentTokens = payloadTokens();
+    if (currentTokens <= budget) return { messages, toolDesc, nativeSchemas, estimatedTokens: currentTokens };
 
     // Tier 3: Truncate system prompt
     const sysContent = messages[0].content;
@@ -748,13 +790,14 @@ function preflightContextCheck(
         emit("context", { message: `tier-3: truncated system prompt -> ~${payloadTokens()} tokens` });
     }
 
-    if (payloadTokens() > budget) {
+    currentTokens = payloadTokens();
+    if (currentTokens > budget) {
         emit("warn", {
             message: `pre-flight: payload still ~${payloadTokens()} tokens after all shedding (budget ${budget}). Consider increasing CONTEXT_WINDOW or reducing tools/instruction.`,
         });
     }
 
-    return { messages, toolDesc, nativeSchemas };
+    return { messages, toolDesc, nativeSchemas, estimatedTokens: currentTokens };
 }
 
 
@@ -820,32 +863,37 @@ export function microCompactToolResults(
     }
 
     // Keep the most recent N compactable tool results
+    const compactableIdSet = new Set(compactableIds);
+    const compactableTextIndexSet = new Set(compactableTextIndices);
     const keepIds = new Set(compactableIds.slice(-keepRecent));
     const keepTextIndices = new Set(compactableTextIndices.slice(-keepRecent));
 
     // Clear old compactable tool results
     const result: LLMMessage[] = [];
+    let changed = false;
     for (let i = 0; i < messages.length; i++) {
         const msg = messages[i]!;
 
         // Native tool results
         if (msg.role === "tool" && msg.toolCallId) {
-            if (compactableIds.includes(msg.toolCallId) && !keepIds.has(msg.toolCallId)) {
+            if (compactableIdSet.has(msg.toolCallId) && !keepIds.has(msg.toolCallId)) {
                 result.push({
                     role: "tool",
                     content: "[Old tool result cleared to save context]",
                     toolCallId: msg.toolCallId,
                 });
+                changed = true;
                 continue;
             }
         }
         // Text-based tool results
         else if (msg.role === "user" && typeof msg.content === "string" && msg.content.startsWith("[Tool Result]")) {
-            if (i > 0 && compactableTextIndices.includes(i - 1) && !keepTextIndices.has(i - 1)) {
+            if (i > 0 && compactableTextIndexSet.has(i - 1) && !keepTextIndices.has(i - 1)) {
                 result.push({
                     role: "user",
                     content: "[Tool Result] [Old tool result cleared to save context]",
                 });
+                changed = true;
                 continue;
             }
         }
@@ -853,7 +901,7 @@ export function microCompactToolResults(
         result.push(msg);
     }
 
-    return result;
+    return changed ? result : messages;
 }
 
 
@@ -870,12 +918,13 @@ function softTrimMessages(
     tokenMultiplier: number,
     emit: OnEvent,
     modelName?: string,
+    currentTokens?: number,
 ): LLMMessage[] {
     const { window: effectiveWindow, ratio: budgetRatio } = modelName
         ? resolveContextBudget(modelName, contextWindow)
         : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
     const softBudget = Math.floor(effectiveWindow * budgetRatio * SOFT_TRIM_BUDGET_FRACTION);
-    const currentTokens = estimateMessagesTokens(messages, tokenMultiplier);
+    currentTokens ??= estimateMessagesTokens(messages, tokenMultiplier, modelName);
 
     if (currentTokens <= softBudget) return messages;
 
@@ -955,7 +1004,7 @@ function softTrimMessages(
     if (trimCount > 0) {
         emit("context", { message: `soft-trim: trimmed ${trimCount} old tool results` });
     }
-    return result;
+    return trimCount > 0 ? result : messages;
 }
 
 
@@ -1031,6 +1080,7 @@ export async function compactIfNeeded(
     tokenMultiplier: number,
     modelName?: string,
     runContext?: RunContext<unknown>,
+    knownCurrentTokens?: number,
 ): Promise<LLMMessage[]> {
     messages = truncateOldToolArgs(messages, RECENT_PROTECTED_COUNT);
 
@@ -1047,7 +1097,9 @@ export async function compactIfNeeded(
     }
     messages = compactedMsgs;
 
-    const currentTokens = estimateMessagesTokens(messages, tokenMultiplier);
+    const currentTokens = toolResultsCompacted || knownCurrentTokens === undefined
+        ? estimateMessagesTokens(messages, tokenMultiplier, modelName)
+        : knownCurrentTokens;
 
     if (currentTokens <= budget) return messages;
 
@@ -1349,6 +1401,8 @@ export interface AgentLoopExtras<TContext = unknown> {
     outputType?: OutputTypeSpec;
     /** Pluggable conversation-history backend. */
     session?: Session;
+    /** Stable provider cache/affinity identity. Defaults to session.sessionId or a per-run UUID. */
+    sessionId?: string;
     /** Max prior session messages to preload; null disables the cap. */
     sessionPreloadLimit?: number | null;
     /** Typed stream-event sink (in addition to the legacy `onEvent`). */
@@ -1415,6 +1469,11 @@ export async function runAgentGraph<TContext = unknown>(
     const outputGuardrails = extras?.outputGuardrails ?? [];
     const outputType = extras?.outputType;
     const sessionBackend: Session | undefined = extras?.session;
+    const metadataSessionId = runContext._metadata["sessionId"];
+    const providerSessionId = extras?.sessionId
+        ?? sessionBackend?.sessionId
+        ?? (typeof metadataSessionId === "string" && metadataSessionId.length > 0 ? metadataSessionId : randomUUID());
+    runContext._metadata["sessionId"] = providerSessionId;
     const sessionPreloadLimit = extras?.sessionPreloadLimit === undefined
         ? 200
         : extras.sessionPreloadLimit;
@@ -1636,10 +1695,19 @@ export async function runAgentGraph<TContext = unknown>(
     // Initialize tokenizer encoder for accurate token counting
     await initTokenizer(resolvedModelName);
 
-    // Pre-flight: ensure initial payload fits in context window
-    ({ messages, toolDesc, nativeSchemas } = preflightContextCheck(
+    // Pre-flight: ensure initial payload fits in context window. This is the
+    // one normal-path full tokenization; later rounds count only appended messages.
+    const preflight = preflightContextCheck(
         messages, contextWindow, toolDesc, nativeSchemas, registry, emit,
-    ));
+    );
+    messages = preflight.messages;
+    toolDesc = preflight.toolDesc;
+    nativeSchemas = preflight.nativeSchemas;
+    const tokenLedger = new IncrementalTokenLedger(
+        (batch) => estimateMessagesTokens(batch, tokenMultiplier, resolvedModelName),
+    );
+    tokenLedger.rebase(messages, preflight.estimatedTokens);
+    usage.sampleMemory();
 
     const state: AgentState = {
         messages,
@@ -1773,13 +1841,49 @@ export async function runAgentGraph<TContext = unknown>(
 
             // Patch dangling tool calls before sending to LLM
             messages = patchDanglingToolCalls(messages);
-            // Claude Code pattern: clear old tool results — but only when the
-            // transcript is actually filling up (see MICRO_COMPACT_MIN_USAGE_RATIO).
-            if (estimateMessagesTokens(messages, tokenMultiplier) > contextWindow * MICRO_COMPACT_MIN_USAGE_RATIO) {
-                messages = microCompactToolResults(messages);
+            let currentContextTokens = tokenLedger.estimate(messages);
+            const contextBudget = resolvedModelName
+                ? resolveContextBudget(resolvedModelName, contextWindow)
+                : { window: contextWindow, ratio: CONTEXT_BUDGET_RATIO };
+            const compactionBudget = Math.floor(contextBudget.window * contextBudget.ratio);
+            const softTrimBudget = Math.floor(compactionBudget * SOFT_TRIM_BUDGET_FRACTION);
+
+            // Transcript-wide transforms run only near their thresholds. When
+            // one rewrites history, establish a new full-count checkpoint once.
+            if (currentContextTokens > contextBudget.window * MICRO_COMPACT_MIN_USAGE_RATIO) {
+                const compacted = microCompactToolResults(messages);
+                if (compacted !== messages) {
+                    messages = compacted;
+                    currentContextTokens = tokenLedger.rebase(messages);
+                }
             }
-            messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
-            messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName, runContext);
+            if (currentContextTokens > softTrimBudget) {
+                const trimmed = softTrimMessages(
+                    messages,
+                    contextWindow,
+                    tokenMultiplier,
+                    emit,
+                    resolvedModelName,
+                    currentContextTokens,
+                );
+                if (trimmed !== messages) {
+                    messages = trimmed;
+                    currentContextTokens = tokenLedger.rebase(messages);
+                }
+            }
+            if (currentContextTokens > compactionBudget) {
+                messages = await compactIfNeeded(
+                    messages,
+                    contextWindow,
+                    llm,
+                    emit,
+                    tokenMultiplier,
+                    resolvedModelName,
+                    runContext,
+                    currentContextTokens,
+                );
+                currentContextTokens = tokenLedger.rebase(messages);
+            }
 
             // External pre_llm hook (runs before programmatic hook)
             if (extHookRunner) {
@@ -1809,11 +1913,30 @@ export async function runAgentGraph<TContext = unknown>(
 
             let response: LLMResponse;
             try {
-                const buf: string[] = [];
-                const chatOptions: StreamOptions | undefined = streaming
-                    ? { onChunk: (chunk: string) => buf.push(chunk), signal: ac.signal, tools: nativeSchemas }
-                    : nativeSchemas ? { tools: nativeSchemas } : undefined;
+                const requestTokenEstimate = tokenLedger.estimate(messages);
+                const requestStartedAt = performance.now();
+                let timeToFirstTokenMs: number | undefined;
+                const recordFirstToken = (): void => {
+                    if (timeToFirstTokenMs === undefined) {
+                        timeToFirstTokenMs = performance.now() - requestStartedAt;
+                    }
+                };
+                usage.sampleMemory();
+                const chatOptions: StreamOptions = {
+                    signal: ac.signal,
+                    sessionId: providerSessionId,
+                    ...(nativeSchemas ? { tools: nativeSchemas } : {}),
+                    ...(streaming
+                        ? {
+                              onChunk: recordFirstToken,
+                              onFirstToken: recordFirstToken,
+                          }
+                        : {}),
+                };
                 response = await llm.chat(messages, chatOptions);
+                // Non-streaming providers expose only total response latency,
+                // which must not be mislabeled as TTFT.
+                if (streaming) timeToFirstTokenMs ??= performance.now() - requestStartedAt;
                 if (!resolvedModelName && response.model) resolvedModelName = response.model;
 
                 // ── Usage accumulation (openai-agents parity) ─────────
@@ -1821,6 +1944,8 @@ export async function runAgentGraph<TContext = unknown>(
                     const totalTokens = response.tokensUsed ?? 0;
                     const inputTokens = response.promptTokens ?? 0;
                     const outputTokens = Math.max(totalTokens - inputTokens, 0);
+                    tokenLedger.recordProviderUsage(messages, inputTokens || requestTokenEstimate);
+                    const peakMemoryBytes = usage.sampleMemory();
                     const req = usage.addResponse({
                         model: response.model ?? "",
                         inputTokens,
@@ -1828,6 +1953,8 @@ export async function runAgentGraph<TContext = unknown>(
                         totalTokens,
                         cachedInputTokens: response.cacheReadTokens ?? 0,
                         cacheCreationTokens: response.cacheCreationTokens ?? 0,
+                        timeToFirstTokenMs,
+                        peakMemoryBytes,
                     });
                     emit("usage", {
                         model: req.model,
@@ -1836,6 +1963,8 @@ export async function runAgentGraph<TContext = unknown>(
                         totalTokens: req.totalTokens,
                         cachedInputTokens: req.cachedInputTokens,
                         cacheCreationTokens: req.cacheCreationTokens,
+                        timeToFirstTokenMs: req.timeToFirstTokenMs,
+                        peakMemoryBytes: usage.peakMemoryBytes,
                         cumulative: usage.totalTokens,
                     });
                 }
@@ -1882,7 +2011,8 @@ export async function runAgentGraph<TContext = unknown>(
                         state.result = String(err);
                         break;
                     }
-                    const observedRatio = contextWindow / Math.max(estimateMessagesTokens(messages, 1.0), 1);
+                    const overflowTokens = estimateMessagesTokens(messages, 1.0, resolvedModelName);
+                    const observedRatio = contextWindow / Math.max(overflowTokens, 1);
                     tokenMultiplier = Math.min(observedRatio * 1.1, 3.0);
                     // Also shrink the effective window: the multiplier is
                     // capped at 3.0, so with a wildly overstated
@@ -1891,8 +2021,26 @@ export async function runAgentGraph<TContext = unknown>(
                     // would overflow again.
                     contextWindow = Math.max(Math.floor(contextWindow * 0.5), 16_000);
                     emit("context", { message: `token overflow — calibrated multiplier to ${tokenMultiplier.toFixed(2)}, shrunk effective window to ${contextWindow} (retry ${overflowRetries}/${MAX_OVERFLOW_RETRIES})` });
-                    messages = softTrimMessages(messages, contextWindow, tokenMultiplier, emit, resolvedModelName);
-                    messages = await compactIfNeeded(messages, contextWindow, llm, emit, tokenMultiplier, resolvedModelName, runContext);
+                    messages = softTrimMessages(
+                        messages,
+                        contextWindow,
+                        tokenMultiplier,
+                        emit,
+                        resolvedModelName,
+                        overflowTokens,
+                    );
+                    const trimmedTokens = estimateMessagesTokens(messages, tokenMultiplier, resolvedModelName);
+                    messages = await compactIfNeeded(
+                        messages,
+                        contextWindow,
+                        llm,
+                        emit,
+                        tokenMultiplier,
+                        resolvedModelName,
+                        runContext,
+                        trimmedTokens,
+                    );
+                    tokenLedger.rebase(messages);
                     // Don't persist recovery-compaction artifacts to the session.
                     sessionNoteMessages(false);
                     continue;
@@ -2317,6 +2465,7 @@ export async function runAgentGraph<TContext = unknown>(
                     },
                 );
                 state.toolCalls++;
+                usage.sampleMemory();
                 await fireHook("onToolEnd", { toolName: call.toolName, args: call.args, result: toolResult, toolCallId: callId });
 
                 // External post_tool_use hook
@@ -2608,6 +2757,7 @@ export async function runAgentGraph<TContext = unknown>(
                     },
                 );
                 state.toolCalls += approvedCalls.length;
+                usage.sampleMemory();
 
                 // onToolEnd for each approved call
                 for (let idx = 0; idx < approvedCalls.length; idx++) {
@@ -2811,6 +2961,7 @@ export async function runAgentGraph<TContext = unknown>(
         process.off("SIGINT", onSigint);
     }
 
+    usage.sampleMemory();
     const elapsed = (Date.now() - t0) / 1000;
     // Don't clobber the combined parent+child transcript a handoff installed.
     if (!handoffTranscriptSet) {
@@ -2953,6 +3104,10 @@ export async function runAgentGraph<TContext = unknown>(
         tool_calls: state.toolCalls,
         iterations: state.iterations,
         elapsed,
+        input_tokens: usage.inputTokens,
+        cache_read_tokens: usage.cachedInputTokens,
+        time_to_first_token_ms: usage.timeToFirstTokenMs,
+        peak_memory_bytes: usage.peakMemoryBytes,
     });
     return state;
 }

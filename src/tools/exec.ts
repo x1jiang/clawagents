@@ -183,7 +183,10 @@ function createExecTool(sb: SandboxBackend): Tool {
                 "exec.run",
                 async () => {
                     try {
-                        const result = await sb.exec(command, { timeout });
+                        const result = await sb.exec(command, {
+                            timeout,
+                            maxOutputChars: MAX_OUTPUT_CHARS,
+                        });
 
                         if (result.killed) {
                             return {

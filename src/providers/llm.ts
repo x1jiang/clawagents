@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import type { EngineConfig } from "../config/config.js";
 import { imageUrlToAnthropicBlock } from "../media/images.js";
 
@@ -57,8 +58,12 @@ export interface LLMResponse {
 
 export interface StreamOptions {
     onChunk?: (chunk: string) => void;
+    /** Called when the provider emits its first text or tool-call token. */
+    onFirstToken?: () => void;
     signal?: AbortSignal;
     tools?: NativeToolSchema[];
+    /** Stable logical session identity used for provider prompt caching/affinity. */
+    sessionId?: string;
 }
 
 export interface LLMProvider {
@@ -348,6 +353,7 @@ export class OpenAIProvider implements LLMProvider {
     private model: string;
     private maxTokens: number;
     private temperature: number;
+    private baseUrl: string;
 
     constructor(config: EngineConfig) {
         const apiKey = config.openaiApiKey || (config.openaiBaseUrl ? "not-needed" : "");
@@ -362,6 +368,7 @@ export class OpenAIProvider implements LLMProvider {
         this.model = config.openaiModel;
         this.maxTokens = config.maxTokens;
         this.temperature = resolveTemperature(config.openaiModel, config.temperature);
+        this.baseUrl = config.openaiBaseUrl || "https://api.openai.com/v1";
     }
 
     async chat(messages: LLMMessage[], options?: StreamOptions): Promise<LLMResponse> {
@@ -393,7 +400,7 @@ export class OpenAIProvider implements LLMProvider {
         const oaiTools = options?.tools ? toOpenAITools(options.tools) : undefined;
 
         if (!options?.onChunk) {
-            return withRetry("openai", () => this.requestOnce(formatted, oaiTools));
+            return withRetry("openai", () => this.requestOnce(formatted, oaiTools, options?.sessionId));
         }
         return this.streamWithRetry(formatted, options, oaiTools);
     }
@@ -401,14 +408,17 @@ export class OpenAIProvider implements LLMProvider {
     private async requestOnce(
         messages: Array<Record<string, unknown>>,
         tools?: OpenAI.Chat.Completions.ChatCompletionTool[],
+        sessionId?: string,
     ): Promise<LLMResponse> {
+        const affinity = this.affinity(sessionId);
         const resp = await this.client.chat.completions.create({
             model: this.model,
             messages: messages as unknown as Parameters<typeof this.client.chat.completions.create>[0]["messages"],
             max_completion_tokens: this.maxTokens,
             temperature: this.temperature,
+            ...(affinity.promptCacheKey ? { prompt_cache_key: affinity.promptCacheKey } : {}),
             ...(tools ? { tools } : {}),
-        });
+        }, affinity.requestOptions);
         const msg = resp.choices[0]?.message;
         const nativeToolCalls = parseOpenAIToolCalls(msg?.tool_calls);
         return {
@@ -416,6 +426,7 @@ export class OpenAIProvider implements LLMProvider {
             model: this.model,
             tokensUsed: resp.usage?.total_tokens ?? 0,
             promptTokens: resp.usage?.prompt_tokens ?? 0,
+            cacheReadTokens: resp.usage?.prompt_tokens_details?.cached_tokens ?? 0,
             ...(nativeToolCalls ? { toolCalls: nativeToolCalls } : {}),
         };
     }
@@ -437,6 +448,7 @@ export class OpenAIProvider implements LLMProvider {
             const chunks: string[] = [];
             let finalTokens = 0;
             let finalPromptTokens = 0;
+            let finalCacheReadTokens = 0;
             const toolsAcc: Record<number, { id: string; name: string; arguments: string }> = {};
             const accumulatedCalls = (): NativeToolCall[] | undefined => {
                 const accKeys = Object.keys(toolsAcc).map(Number).sort((a, b) => a - b);
@@ -449,6 +461,7 @@ export class OpenAIProvider implements LLMProvider {
             };
 
             try {
+                const affinity = this.affinity(options.sessionId);
                 const stream = await this.client.chat.completions.create({
                     model: this.model,
                     messages: messages as unknown as Parameters<typeof this.client.chat.completions.create>[0]["messages"],
@@ -456,8 +469,9 @@ export class OpenAIProvider implements LLMProvider {
                     temperature: this.temperature,
                     stream: true,
                     stream_options: { include_usage: true },
+                    ...(affinity.promptCacheKey ? { prompt_cache_key: affinity.promptCacheKey } : {}),
                     ...(tools ? { tools } : {}),
-                });
+                }, affinity.requestOptions);
 
                 for await (const chunk of withStallDetection(stream, RETRY.chunkStallMs)) {
                     if (options.signal?.aborted) {
@@ -466,6 +480,7 @@ export class OpenAIProvider implements LLMProvider {
                         return {
                             content: chunks.join(""), model: this.model,
                             tokensUsed: finalTokens, promptTokens: finalPromptTokens,
+                            cacheReadTokens: finalCacheReadTokens,
                             partial: true,
                             ...(aborted ? { toolCalls: aborted } : {}),
                         };
@@ -474,11 +489,13 @@ export class OpenAIProvider implements LLMProvider {
                     try {
                         if (chunk.choices?.[0]?.delta?.content) {
                             const text = chunk.choices[0].delta.content;
+                            try { options.onFirstToken?.(); } catch { /* callback error — isolated */ }
                             chunks.push(text);
                             try { options.onChunk!(text); } catch { /* callback error — isolated */ }
                         }
                         const deltaToolCalls = chunk.choices?.[0]?.delta?.tool_calls;
                         if (deltaToolCalls) {
+                            try { options.onFirstToken?.(); } catch { /* callback error — isolated */ }
                             for (const tc of deltaToolCalls) {
                                 const idx = tc.index;
                                 if (!(idx in toolsAcc)) toolsAcc[idx] = { id: "", name: "", arguments: "" };
@@ -490,6 +507,7 @@ export class OpenAIProvider implements LLMProvider {
                         if (chunk.usage) {
                             finalTokens = chunk.usage.total_tokens ?? 0;
                             finalPromptTokens = chunk.usage.prompt_tokens ?? 0;
+                            finalCacheReadTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
                         }
                     } catch {
                         // Malformed chunk — skip and continue
@@ -500,6 +518,7 @@ export class OpenAIProvider implements LLMProvider {
                 return {
                     content: chunks.join(""), model: this.model,
                     tokensUsed: finalTokens, promptTokens: finalPromptTokens,
+                    cacheReadTokens: finalCacheReadTokens,
                     ...(nativeCalls ? { toolCalls: nativeCalls } : {}),
                 };
             } catch (err) {
@@ -524,6 +543,7 @@ export class OpenAIProvider implements LLMProvider {
                     return {
                         content: partial, model: this.model,
                         tokensUsed: finalTokens, promptTokens: finalPromptTokens,
+                        cacheReadTokens: finalCacheReadTokens,
                         partial: true,
                         ...(nativeCalls ? { toolCalls: nativeCalls } : {}),
                     };
@@ -533,6 +553,30 @@ export class OpenAIProvider implements LLMProvider {
         }
 
         throw lastError;
+    }
+
+    private affinity(sessionId?: string): {
+        promptCacheKey?: string;
+        requestOptions?: { headers: Record<string, string> };
+    } {
+        if (!sessionId) return {};
+        const key = `claw-${createHash("sha256").update(sessionId).digest("hex").slice(0, 32)}`;
+        const lowerBaseUrl = this.baseUrl.toLowerCase();
+        if (lowerBaseUrl.includes("api.openai.com")) {
+            return {
+                promptCacheKey: key,
+                requestOptions: {
+                    headers: {
+                        session_id: key,
+                        "x-client-request-id": key,
+                    },
+                },
+            };
+        }
+        if (lowerBaseUrl.includes("openrouter.ai")) {
+            return { requestOptions: { headers: { "x-session-id": key } } };
+        }
+        return {};
     }
 }
 
@@ -718,22 +762,26 @@ export class GeminiProvider implements LLMProvider {
                     // used to record output-only (and no prompt), garbling
                     // usage accounting.
                     const retryPrompt = retryResp.usageMetadata?.promptTokenCount || 0;
+                    const retryCacheRead = (retryResp.usageMetadata as any)?.cachedContentTokenCount || 0;
                     return {
                         content: retryText,
                         model: this.model,
                         tokensUsed: retryPrompt + (retryResp.usageMetadata?.candidatesTokenCount || 0),
                         promptTokens: retryPrompt,
+                        cacheReadTokens: retryCacheRead,
                         ...(retryFnCalls?.length ? { toolCalls: retryFnCalls } : {}),
                         ...(retryRawParts ? { geminiParts: retryRawParts } : {}),
                     };
                 }
 
                 const promptTokens = resp.usageMetadata?.promptTokenCount || 0;
+                const cacheReadTokens = (resp.usageMetadata as any)?.cachedContentTokenCount || 0;
                 return {
                     content: extractedText,
                     model: this.model,
                     tokensUsed: promptTokens + (resp.usageMetadata?.candidatesTokenCount || 0),
                     promptTokens,
+                    cacheReadTokens,
                     ...(fnCalls?.length ? { toolCalls: fnCalls } : {}),
                     ...(rawParts ? { geminiParts: rawParts } : {}),
                 };
@@ -759,6 +807,7 @@ export class GeminiProvider implements LLMProvider {
             const chunks: string[] = [];
             let finalTokens = 0;
             let finalPromptTokens = 0;
+            let finalCacheReadTokens = 0;
             const fnCalls: NativeToolCall[] = [];
             const allStreamParts: any[] = [];
             let lastFinishReason: string | undefined;
@@ -768,7 +817,7 @@ export class GeminiProvider implements LLMProvider {
 
                 for await (const chunk of withStallDetection(stream, RETRY.chunkStallMs)) {
                     if (options.signal?.aborted) {
-                        return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(allStreamParts.length ? { geminiParts: serializeGeminiParts(allStreamParts) } : {}) };
+                        return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, cacheReadTokens: finalCacheReadTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(allStreamParts.length ? { geminiParts: serializeGeminiParts(allStreamParts) } : {}) };
                     }
 
                     try {
@@ -783,10 +832,12 @@ export class GeminiProvider implements LLMProvider {
                                     for (const p of parts) {
                                         allStreamParts.push(p);
                                         if (typeof p?.text === "string" && !p?.thought) {
+                                            try { options.onFirstToken?.(); } catch { /* callback error — isolated */ }
                                             chunks.push(p.text);
                                             try { options.onChunk!(p.text); } catch { /* callback error — isolated */ }
                                         }
                                         if (p?.functionCall) {
+                                            try { options.onFirstToken?.(); } catch { /* callback error — isolated */ }
                                             fnCalls.push({
                                                 toolName: p.functionCall.name as string,
                                                 args: (p.functionCall.args ?? {}) as Record<string, unknown>,
@@ -800,6 +851,7 @@ export class GeminiProvider implements LLMProvider {
                         if ((chunk as any).usageMetadata) {
                             const um = (chunk as any).usageMetadata;
                             finalPromptTokens = um.promptTokenCount || 0;
+                            finalCacheReadTokens = um.cachedContentTokenCount || 0;
                             finalTokens = finalPromptTokens + (um.candidatesTokenCount || 0);
                         }
                     } catch {
@@ -825,18 +877,20 @@ export class GeminiProvider implements LLMProvider {
                         .map((p: any) => p.text)
                         .join("") ?? "";
                     const retryPrompt = retryResp.usageMetadata?.promptTokenCount || 0;
+                    const retryCacheRead = (retryResp.usageMetadata as any)?.cachedContentTokenCount || 0;
                     return {
                         content: retryText,
                         model: this.model,
                         tokensUsed: retryPrompt + (retryResp.usageMetadata?.candidatesTokenCount || 0),
                         promptTokens: retryPrompt,
+                        cacheReadTokens: retryCacheRead,
                         ...(retryFnCalls?.length ? { toolCalls: retryFnCalls } : {}),
                         ...(retryRawParts ? { geminiParts: retryRawParts } : {}),
                     };
                 }
 
                 const rawParts = serializeGeminiParts(allStreamParts);
-                return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
+                return { content: chunks.join(""), model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, cacheReadTokens: finalCacheReadTokens, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
             } catch (err) {
                 lastError = err;
 
@@ -854,7 +908,7 @@ export class GeminiProvider implements LLMProvider {
                         `  [gemini] Stream interrupted after ${partial.length} chars — returning partial content`,
                     );
                     const rawParts = serializeGeminiParts(allStreamParts);
-                    return { content: partial, model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
+                    return { content: partial, model: this.model, tokensUsed: finalTokens, promptTokens: finalPromptTokens, cacheReadTokens: finalCacheReadTokens, partial: true, ...(fnCalls.length ? { toolCalls: fnCalls } : {}), ...(rawParts ? { geminiParts: rawParts } : {}) };
                 }
                 break;
             }
@@ -1109,9 +1163,11 @@ export class AnthropicProvider implements LLMProvider {
                         }
                     } else if (event.type === "content_block_delta") {
                         if (typeof event.delta?.text === "string") {
+                            try { options.onFirstToken?.(); } catch { /* callback error — isolated */ }
                             chunks.push(event.delta.text);
                             try { options.onChunk!(event.delta.text); } catch { /* callback error — isolated */ }
                         } else if (typeof event.delta?.partial_json === "string" && currentTool) {
+                            try { options.onFirstToken?.(); } catch { /* callback error — isolated */ }
                             currentTool.inputJson += event.delta.partial_json;
                         }
                     } else if (event.type === "content_block_stop") {

@@ -27,6 +27,16 @@ export interface ExecResult {
     killed?: boolean;
 }
 
+export interface ExecOptions {
+    timeout?: number;
+    cwd?: string;
+    env?: Record<string, string>;
+    /** Maximum retained characters for each of stdout and stderr. */
+    maxOutputChars?: number;
+    /** Receives decoded output chunks as the child process produces them. */
+    onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
+}
+
 export interface SandboxBackend {
     /** Human-readable label (e.g. "local", "memory", "docker"). */
     readonly kind: string;
@@ -71,6 +81,6 @@ export interface SandboxBackend {
 
     exec(
         command: string,
-        opts?: { timeout?: number; cwd?: string; env?: Record<string, string> },
+        opts?: ExecOptions,
     ): Promise<ExecResult>;
 }

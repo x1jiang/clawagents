@@ -1,12 +1,9 @@
-import { execFile as execFileCb } from "node:child_process";
 import { access, mkdir, readFile, readdir, stat as fsStat, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { promisify } from "node:util";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isSecretName } from "../redact.js";
-import type { DirEntry, ExecResult, FileStat, SandboxBackend } from "./backend.js";
-
-const execFile = promisify(execFileCb);
+import type { DirEntry, ExecOptions, ExecResult, FileStat, SandboxBackend } from "./backend.js";
+import { runBoundedProcess } from "./bounded-process.js";
 
 const SANDBOX_EXTRA_ENV_RE =
     /(?:SK[_-]?LIVE|SK[_-]?TEST|GITHUB[_-]?PAT|DATABASE[_-]?URL|CONNECTION[_-]?STRING|DSN)/i;
@@ -120,23 +117,12 @@ export class DockerBackend implements SandboxBackend {
 
     async exec(
         command: string,
-        opts?: { timeout?: number; cwd?: string; env?: Record<string, string> },
+        opts: ExecOptions = {},
     ): Promise<ExecResult> {
-        try {
-            const { stdout, stderr } = await execFile(
-                this.dockerBin,
-                this.buildDockerArgs(command, opts),
-                { timeout: opts?.timeout ?? 30_000, maxBuffer: 1024 * 1024 },
-            );
-            return { stdout: stdout || "", stderr: stderr || "", exitCode: 0 };
-        } catch (err: unknown) {
-            const e = err as { stdout?: string; stderr?: string; message?: string; killed?: boolean; code?: number };
-            return {
-                stdout: e.stdout ?? "",
-                stderr: e.stderr ?? e.message ?? String(err),
-                exitCode: typeof e.code === "number" ? e.code : 1,
-                ...(e.killed ? { killed: true } : {}),
-            };
-        }
+        return await runBoundedProcess(this.dockerBin, this.buildDockerArgs(command, opts), {
+            ...opts,
+            cwd: this.cwd,
+            defaultCwd: this.cwd,
+        });
     }
 }

@@ -23,17 +23,15 @@ import {
     sep,
     delimiter as pathDelimiter,
 } from "node:path";
-import { exec as execCb } from "node:child_process";
-import { promisify } from "node:util";
 import { isSecretName } from "../redact.js";
 import type {
     SandboxBackend,
     DirEntry,
     FileStat,
     ExecResult,
+    ExecOptions,
 } from "./backend.js";
-
-const execAsync = promisify(execCb);
+import { runBoundedProcess } from "./bounded-process.js";
 
 export class LocalBackend implements SandboxBackend {
     readonly kind = "local" as const;
@@ -189,7 +187,7 @@ export class LocalBackend implements SandboxBackend {
 
     async exec(
         command: string,
-        opts?: { timeout?: number; cwd?: string; env?: Record<string, string> },
+        opts: ExecOptions = {},
     ): Promise<ExecResult> {
         const cwd = opts?.cwd ?? this.cwd;
         const nodeBin = join(cwd, "node_modules", ".bin");
@@ -197,24 +195,12 @@ export class LocalBackend implements SandboxBackend {
         const pathEnv = baseEnv.PATH ?? "";
         const newPath = nodeBin + (pathEnv ? pathDelimiter + pathEnv : "");
         const env = { ...baseEnv, ...opts?.env, PAGER: "cat", PATH: newPath };
-        try {
-            const { stdout, stderr } = await execAsync(command, {
-                timeout: opts?.timeout ?? 30_000,
-                maxBuffer: 1024 * 1024,
-                cwd,
-                env,
-            });
-            return { stdout: stdout || "", stderr: stderr || "", exitCode: 0 };
-        } catch (err: unknown) {
-            const e = err as { stdout?: string; stderr?: string; message?: string; killed?: boolean; code?: number };
-            if (e.killed) {
-                return { stdout: "", stderr: "", exitCode: 1, killed: true };
-            }
-            return {
-                stdout: e.stdout ?? "",
-                stderr: e.stderr ?? e.message ?? String(err),
-                exitCode: typeof e.code === "number" ? e.code : 1,
-            };
-        }
+        return await runBoundedProcess(command, [], {
+            ...opts,
+            cwd,
+            baseEnv: env,
+            defaultCwd: this.cwd,
+            shell: true,
+        });
     }
 }

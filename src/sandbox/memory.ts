@@ -14,6 +14,7 @@ import type {
     SandboxBackend,
     DirEntry,
     FileStat,
+    ExecOptions,
     ExecResult,
 } from "./backend.js";
 
@@ -26,7 +27,7 @@ interface VFSNode {
 
 export type ExecStub = (
     command: string,
-    opts?: { timeout?: number; cwd?: string; env?: Record<string, string> },
+    opts?: ExecOptions,
 ) => Promise<ExecResult> | ExecResult;
 
 export class InMemoryBackend implements SandboxBackend {
@@ -217,7 +218,7 @@ export class InMemoryBackend implements SandboxBackend {
 
     async exec(
         command: string,
-        opts?: { timeout?: number; cwd?: string; env?: Record<string, string> },
+        opts?: ExecOptions,
     ): Promise<ExecResult> {
         return await this.execStub(command, opts);
     }

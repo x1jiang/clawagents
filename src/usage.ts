@@ -17,6 +17,8 @@ export class RequestUsage {
     cachedInputTokens: number;
     reasoningTokens: number;
     cacheCreationTokens: number;
+    timeToFirstTokenMs: number | undefined;
+    peakMemoryBytes: number;
 
     constructor(init: {
         model?: string;
@@ -26,6 +28,8 @@ export class RequestUsage {
         cachedInputTokens?: number;
         reasoningTokens?: number;
         cacheCreationTokens?: number;
+        timeToFirstTokenMs?: number;
+        peakMemoryBytes?: number;
     } = {}) {
         this.model = init.model ?? "";
         this.inputTokens = init.inputTokens ?? 0;
@@ -34,6 +38,8 @@ export class RequestUsage {
         this.cachedInputTokens = init.cachedInputTokens ?? 0;
         this.reasoningTokens = init.reasoningTokens ?? 0;
         this.cacheCreationTokens = init.cacheCreationTokens ?? 0;
+        this.timeToFirstTokenMs = init.timeToFirstTokenMs;
+        this.peakMemoryBytes = init.peakMemoryBytes ?? 0;
     }
 
     toJSON(): Record<string, unknown> {
@@ -45,6 +51,8 @@ export class RequestUsage {
             cached_input_tokens: this.cachedInputTokens,
             reasoning_tokens: this.reasoningTokens,
             cache_creation_tokens: this.cacheCreationTokens,
+            time_to_first_token_ms: this.timeToFirstTokenMs,
+            peak_memory_bytes: this.peakMemoryBytes,
         };
     }
 }
@@ -58,6 +66,10 @@ export class Usage {
     cachedInputTokens: number = 0;
     reasoningTokens: number = 0;
     cacheCreationTokens: number = 0;
+    /** TTFT for the first model request in this run. */
+    timeToFirstTokenMs: number | undefined;
+    /** Highest observed resident-set size sampled during this run. */
+    peakMemoryBytes: number = 0;
     perRequest: RequestUsage[] = [];
 
     /** Record one LLM call into the running total. */
@@ -69,6 +81,8 @@ export class Usage {
         cachedInputTokens?: number;
         reasoningTokens?: number;
         cacheCreationTokens?: number;
+        timeToFirstTokenMs?: number;
+        peakMemoryBytes?: number;
     }): RequestUsage {
         const req = new RequestUsage(init);
         this.requests += 1;
@@ -78,6 +92,10 @@ export class Usage {
         this.cachedInputTokens += req.cachedInputTokens;
         this.reasoningTokens += req.reasoningTokens;
         this.cacheCreationTokens += req.cacheCreationTokens;
+        if (this.timeToFirstTokenMs === undefined && req.timeToFirstTokenMs !== undefined) {
+            this.timeToFirstTokenMs = req.timeToFirstTokenMs;
+        }
+        this.peakMemoryBytes = Math.max(this.peakMemoryBytes, req.peakMemoryBytes);
         this.perRequest.push(req);
         return req;
     }
@@ -91,7 +109,15 @@ export class Usage {
         this.cachedInputTokens += other.cachedInputTokens;
         this.reasoningTokens += other.reasoningTokens;
         this.cacheCreationTokens += other.cacheCreationTokens;
+        if (this.timeToFirstTokenMs === undefined) this.timeToFirstTokenMs = other.timeToFirstTokenMs;
+        this.peakMemoryBytes = Math.max(this.peakMemoryBytes, other.peakMemoryBytes);
         for (const r of other.perRequest) this.perRequest.push(r);
+    }
+
+    /** Sample current RSS and update the observed run peak. */
+    sampleMemory(memoryBytes = process.memoryUsage().rss): number {
+        this.peakMemoryBytes = Math.max(this.peakMemoryBytes, memoryBytes);
+        return this.peakMemoryBytes;
     }
 
     toJSON(): Record<string, unknown> {
@@ -103,6 +129,8 @@ export class Usage {
             cached_input_tokens: this.cachedInputTokens,
             reasoning_tokens: this.reasoningTokens,
             cache_creation_tokens: this.cacheCreationTokens,
+            time_to_first_token_ms: this.timeToFirstTokenMs,
+            peak_memory_bytes: this.peakMemoryBytes,
             per_request: this.perRequest.map((r) => r.toJSON()),
         };
     }

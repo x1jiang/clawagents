@@ -66,6 +66,9 @@ export interface UsageEvent extends BaseStreamEvent {
     outputTokens: number;
     totalTokens: number;
     model: string;
+    cachedInputTokens: number;
+    timeToFirstTokenMs?: number;
+    peakMemoryBytes: number;
 }
 
 export interface GuardrailTrippedEvent extends BaseStreamEvent {
@@ -199,6 +202,12 @@ export function streamEventFromKind(
                 inputTokens: num(data.inputTokens ?? data.input_tokens),
                 outputTokens: num(data.outputTokens ?? data.output_tokens),
                 totalTokens: num(data.totalTokens ?? data.total_tokens),
+                cachedInputTokens: num(data.cachedInputTokens ?? data.cached_input_tokens),
+                timeToFirstTokenMs:
+                    typeof (data.timeToFirstTokenMs ?? data.time_to_first_token_ms) === "number"
+                        ? num(data.timeToFirstTokenMs ?? data.time_to_first_token_ms)
+                        : undefined,
+                peakMemoryBytes: num(data.peakMemoryBytes ?? data.peak_memory_bytes),
             };
         case "guardrail_tripped":
             return {

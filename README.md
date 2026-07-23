@@ -23,6 +23,7 @@ Highlights from the matching Python line (also reflected in this TS cut where ap
 ### New In v6.12.13
 
 - **Version + docs** aligned with Python **6.12.13** and VS Code **1.0.32**.
+- **Runtime efficiency** — stable OpenAI prompt-cache affinity, provider-backed incremental token accounting, bounded streaming command output, and per-request TTFT/input/cache/RSS telemetry.
 
 ### New In v6.12.12
 
